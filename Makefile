@@ -1,106 +1,27 @@
 SHELL := /bin/bash
 
-# ---------- Runtime ----------
-PYTHON ?= ./.venv/bin/python
-PIP ?= ./.venv/bin/pip
-PROJECT_NAME ?= cryptopred
-GITHUB_REPO ?= cryptopred
-COMMIT_MSG ?= organize cryptopred project
+# ---------- Environment defaults ----------
+ENV_FILES := \
+	env/runtime.env \
+	env/core.env \
+	env/sequence_nn.env \
+	env/logistic_regression.env \
+	env/simulation.env \
+	env/features.env \
+	env/paths.env \
+	env/local.env
 
-# ---------- Core experiment settings ----------
-SYMBOL ?= SOLUSDT
-DATA_SOURCE ?= binance
-RANDOM_STOCK ?= 0
+-include $(ENV_FILES)
+
+# ---------- Derived helpers ----------
 RANDOM_STOCK_FLAG = $(if $(filter 1 true yes,$(RANDOM_STOCK)),--random-stock,)
-STOCK_LIST ?= AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,NFLX,JPM,V,UNH,COST,AVGO,WMT
-INTERVAL ?= 5m
-START ?= 2026-2-1T00:00:00Z
-END ?= 2026-05-18T00:00:00Z
-SPLIT ?= 0.9 
-EDGE ?= 0.0003
-FEE ?= 0.0001
-THRESHOLD ?= 0.70
-POSITION_MODE ?= hold
-EXIT_THRESHOLD ?= 0.45
-MAX_HOLD_BARS ?= 60
-STOP_LOSS ?= 0.002
-TAKE_PROFIT ?= 0.004
-
-# ---------- Sequence neural net settings ----------
-NN_MODEL_TYPE ?= cnn
-NN_LOOKBACK ?= 30
-NN_CNN_FILTERS ?= 16,32
-NN_CNN_KERNEL_SIZES ?= 5,3
-NN_HIDDEN_LAYERS ?= 32,16
-NN_LR ?= 0.001
-NN_EPOCHS ?= 140
-NN_BATCH_SIZE ?= 2048
-NN_L2 ?= 0.0001
-NN_CLASS_WEIGHT_MODE ?= balanced
-NN_SEED ?= 18
-
-# ---------- Train settings ----------
-LR ?= 0.01
-EPOCHS ?= 1500
-L2 ?= 0.001
-CLASS_WEIGHT_MODE ?= balanced
-DECISION_THRESHOLD ?= $(THRESHOLD)
-THRESHOLD_GRID ?= 0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95,0.99
-OPTIMIZE_METRIC ?= f1_y1
-
-# ---------- Bank simulation ----------
-SIM_START ?=
-SIM_DURATION ?=
 SIM_WINDOW_ARGS = $(if $(SIM_START),--start $(SIM_START),) $(if $(SIM_DURATION),--duration $(SIM_DURATION),)
-SIM_STARTING_CASH ?= 10000
-SIM_MIN_INVEST ?= 100
-SIM_MAX_INVEST ?= 9999
-SIM_ACTIVITY_BUCKET ?= auto
-SIM_MARKER_SIZE_BASIS ?= usd
-SIM_REPORT ?= models/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_report.json
-SIM_TRADES ?= data/reports/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_trades.csv
-SIM_VISUALIZATION_OUT ?= data/reports/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
-NN_SIM_REPORT ?= models/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_report.json
-NN_SIM_TRADES ?= data/reports/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_trades.csv
-NN_SIM_VISUALIZATION_OUT ?= data/reports/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
-
-# ---------- Feature settings ----------
-RETURN_WINDOWS ?= 1,3,5,15,30,60
-VOL_WINDOWS ?= 5,15,30,60
-SMA_SHORT_WINDOW ?= 5
-SMA_LONG_WINDOW ?= 20
-EXTRA_SMA_WINDOWS ?= 50,100
-VOLUME_Z_WINDOW ?= 20
-VOLUME_RATIO_WINDOWS ?= 20,60
-TIME_FEATURE_FLAG ?= --include-time-features
-
-# ---------- Paths ----------
-RAW_DATA ?= data/downloads/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/candles.parquet
-FEATURES_DATA ?= data/features/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/features.parquet
-FEATURES_META ?= data/features/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/features.meta.json
-MODEL_OUT ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/logreg.npz
-TRAIN_METRICS ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/train_metrics.json
-BACKTEST_REPORT ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/backtest_report.json
-PREDICTIONS_OUT ?= data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/predictions.parquet
-NN_MODEL_OUT ?= models/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/model.npz
-NN_TRAIN_METRICS ?= models/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/train_metrics.json
-NN_BACKTEST_REPORT ?= models/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/backtest_report.json
-NN_PREDICTIONS_OUT ?= data/reports/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/predictions.parquet
-NN_VISUALIZATION_OUT ?= data/reports/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
 NN_VISUALIZATION_FILE ?= $(notdir $(NN_VISUALIZATION_OUT))
 NN_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(NN_VISUALIZATION_OUT))
-DIAG_REPORT ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/diagnostic_report.json
-DIAG_TABLE ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/diagnostic_threshold_sweep.csv
-DIAG_TEST_PREDICTIONS ?= data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/test_predictions_diagnostic.parquet
-SWEEP_OUTPUT_DIR ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/sweeps
-VISUALIZATION_OUT ?= data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
 VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(VISUALIZATION_OUT))
-REPORTS_PORT ?= 8000
-REPORTS_HOST ?= 192.168.2.197
 VISUALIZATION_FILE ?= $(notdir $(VISUALIZATION_OUT))
 NN_SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(NN_SIM_VISUALIZATION_OUT))
 SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(SIM_VISUALIZATION_OUT))
-VIS_STARTING_CASH ?= 10000
 
 GENERATED_DIRS := $(sort $(dir \
 	$(RAW_DATA) \
@@ -118,7 +39,7 @@ GENERATED_DIRS := $(sort $(dir \
 .PHONY: lr-features lr-train lr-backtest lr-experiment lr-diagnostic lr-sweep lr-visualize lr-sim lr-sim-visualize lr-sim-graph lr-graph lr-serve-lan lr-preflight
 
 run:
-# 	$(MAKE) download
+	$(MAKE) download
 	$(MAKE) experiment
 	$(MAKE) graph
 
@@ -209,7 +130,7 @@ repo-status:
 	@du -sh data models .venv 2>/dev/null || true
 	@echo ""
 	@echo "Source/config files intended for git:"
-	@find src docs .github -type f ! -path '*/__pycache__/*' ! -name '*.pyc' 2>/dev/null | sort
+	@find src docs env .github -type f ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name 'local.env' 2>/dev/null | sort
 	@printf '%s\n' Makefile requirements.txt README.md .gitignore
 
 github-check:
@@ -228,7 +149,7 @@ github-init:
 
 github-commit: github-init
 	@git var GIT_AUTHOR_IDENT >/dev/null 2>&1 || { echo "Missing git author identity. Run: git config --global user.name 'Your Name' && git config --global user.email 'you@example.com'"; exit 1; }
-	@git add .gitignore .github/workflows/smoke.yml README.md docs/project_structure.md Makefile requirements.txt src
+	@git add .gitignore .github/workflows/smoke.yml README.md docs/project_structure.md Makefile requirements.txt env src
 	@if git diff --cached --quiet; then \
 		echo "No source/config/docs changes staged for commit."; \
 	else \

@@ -73,6 +73,26 @@ make lr-experiment
 
 ## Useful Overrides
 
+Default settings live in section files under `env/`:
+
+```text
+env/core.env
+env/sequence_nn.env
+env/logistic_regression.env
+env/simulation.env
+env/features.env
+env/paths.env
+env/runtime.env
+```
+
+For personal defaults, copy `env/local.env.example` to `env/local.env`. That file is ignored by git and is loaded after the tracked env files.
+
+Command-line overrides still win:
+
+```bash
+make experiment SYMBOL=BTCUSDT NN_EPOCHS=50
+```
+
 Use BTC instead of SOL:
 
 ```bash

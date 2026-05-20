@@ -8,6 +8,7 @@ This project intentionally keeps a simple script-based layout instead of a Pytho
 src/                         Python scripts and model code
 Makefile                     Main command interface
 requirements.txt             Python dependencies
+env/                         Sectioned Make defaults
 README.md                    Project overview and commands
 docs/                        Project notes
 .github/workflows/smoke.yml  GitHub smoke check
@@ -32,6 +33,22 @@ models/sim/<pipeline>/<source>/<symbol>/<interval>/
 These generated folders are ignored by git.
 
 ## Model Families
+
+## Environment Defaults
+
+The Makefile loads tracked section files from `env/`:
+
+```text
+runtime.env              Python and project/GitHub defaults
+core.env                 Symbol, interval, dates, fees, thresholds
+sequence_nn.env          CNN/MLP sequence-model settings
+logistic_regression.env  LR training settings
+simulation.env           Bank simulator settings and sim outputs
+features.env             LR feature engineering settings
+paths.env                Organized generated output paths
+```
+
+Optional personal overrides go in `env/local.env`, which is ignored by git. Command-line overrides still take precedence.
 
 `nn` targets use the sequence neural-network pipeline:
 
