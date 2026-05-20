@@ -55,10 +55,14 @@ SIM_WINDOW_ARGS = $(if $(SIM_START),--start $(SIM_START),) $(if $(SIM_DURATION),
 SIM_STARTING_CASH ?= 10000
 SIM_MIN_INVEST ?= 100
 SIM_MAX_INVEST ?= 9999
+SIM_ACTIVITY_BUCKET ?= auto
+SIM_MARKER_SIZE_BASIS ?= usd
 SIM_REPORT ?= models/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_report.json
 SIM_TRADES ?= data/reports/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_trades.csv
+SIM_VISUALIZATION_OUT ?= data/reports/sim/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
 NN_SIM_REPORT ?= models/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_report.json
 NN_SIM_TRADES ?= data/reports/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/bank_trades.csv
+NN_SIM_VISUALIZATION_OUT ?= data/reports/sim/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
 
 # ---------- Feature settings ----------
 RETURN_WINDOWS ?= 1,3,5,15,30,60
@@ -84,14 +88,18 @@ NN_BACKTEST_REPORT ?= models/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTE
 NN_PREDICTIONS_OUT ?= data/reports/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/predictions.parquet
 NN_VISUALIZATION_OUT ?= data/reports/nn/$(NN_MODEL_TYPE)/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
 NN_VISUALIZATION_FILE ?= $(notdir $(NN_VISUALIZATION_OUT))
+NN_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(NN_VISUALIZATION_OUT))
 DIAG_REPORT ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/diagnostic_report.json
 DIAG_TABLE ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/diagnostic_threshold_sweep.csv
 DIAG_TEST_PREDICTIONS ?= data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/test_predictions_diagnostic.parquet
 SWEEP_OUTPUT_DIR ?= models/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/sweeps
 VISUALIZATION_OUT ?= data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/$(INTERVAL)/visualization.html
+VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(VISUALIZATION_OUT))
 REPORTS_PORT ?= 8000
 REPORTS_HOST ?= 192.168.2.197
 VISUALIZATION_FILE ?= $(notdir $(VISUALIZATION_OUT))
+NN_SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(NN_SIM_VISUALIZATION_OUT))
+SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(SIM_VISUALIZATION_OUT))
 VIS_STARTING_CASH ?= 10000
 
 GENERATED_DIRS := $(sort $(dir \
@@ -100,14 +108,14 @@ GENERATED_DIRS := $(sort $(dir \
 	$(MODEL_OUT) $(TRAIN_METRICS) $(BACKTEST_REPORT) $(PREDICTIONS_OUT) \
 	$(NN_MODEL_OUT) $(NN_TRAIN_METRICS) $(NN_BACKTEST_REPORT) $(NN_PREDICTIONS_OUT) $(NN_VISUALIZATION_OUT) \
 	$(DIAG_REPORT) $(DIAG_TABLE) $(DIAG_TEST_PREDICTIONS) $(SWEEP_OUTPUT_DIR)/ $(VISUALIZATION_OUT) \
-	$(SIM_REPORT) $(SIM_TRADES) $(NN_SIM_REPORT) $(NN_SIM_TRADES) \
+	$(SIM_REPORT) $(SIM_TRADES) $(SIM_VISUALIZATION_OUT) $(NN_SIM_REPORT) $(NN_SIM_TRADES) $(NN_SIM_VISUALIZATION_OUT) \
 ))
 
 
-.PHONY: help install dirs download nn train backtest experiment diagnostic sweep visualize sim day-sim serve-reports graph serve-lan preflight run clean smoke repo-status
+.PHONY: help install dirs download nn train backtest experiment diagnostic sweep visualize sim sim-visualize sim-graph day-sim serve-reports graph serve-lan preflight run clean smoke repo-status
 .PHONY: github-check github-init github-commit github-create-private github-push github-publish
-.PHONY: nn-train nn-backtest nn-experiment nn-diagnostic nn-visualize nn-sim nn-graph nn-serve-lan nn-servre-lan
-.PHONY: lr-features lr-train lr-backtest lr-experiment lr-diagnostic lr-sweep lr-visualize lr-sim lr-graph lr-serve-lan lr-preflight
+.PHONY: nn-train nn-backtest nn-experiment nn-diagnostic nn-visualize nn-sim nn-sim-visualize nn-sim-graph nn-graph nn-serve-lan nn-servre-lan
+.PHONY: lr-features lr-train lr-backtest lr-experiment lr-diagnostic lr-sweep lr-visualize lr-sim lr-sim-visualize lr-sim-graph lr-graph lr-serve-lan lr-preflight
 
 run:
 # 	$(MAKE) download
@@ -123,6 +131,8 @@ help:
 	@echo "  make experiment   - run sequence neural net train -> sequence backtest"
 	@echo "  make visualize    - create sequence neural net HTML visualization"
 	@echo "  make sim          - simulate bank-account trades from sequence neural net predictions"
+	@echo "  make sim-visualize - create bank simulation HTML visualization"
+	@echo "  make sim-graph    - serve bank simulation HTML visualization on LAN"
 	@echo "  make graph    - serve sequence neural net report on LAN"
 	@echo "  make serve-lan    - alias for make graph"
 	@echo "  make run          - run default sequence neural net pipeline -> serve LAN report"
@@ -146,7 +156,9 @@ help:
 	@echo "  make download DATA_SOURCE=yahoo SYMBOL=AAPL INTERVAL=5m"
 	@echo "  make download DATA_SOURCE=yahoo RANDOM_STOCK=1 INTERVAL=1d"
 	@echo "  make sim"
+	@echo "  make sim-visualize"
 	@echo "  make sim SIM_START=2026-01-12 SIM_DURATION=1D"
+	@echo "  make sim-visualize SIM_ACTIVITY_BUCKET=hour SIM_MARKER_SIZE_BASIS=usd"
 	@echo ""
 	@echo "Fee/position testing examples:"
 	@echo "  make backtest FEE=0.0005 POSITION_MODE=hold EXIT_THRESHOLD=0.45 MAX_HOLD_BARS=120"
@@ -173,6 +185,10 @@ sweep: lr-sweep
 visualize: nn-visualize
 
 sim: nn-sim
+
+sim-visualize: nn-sim-visualize
+
+sim-graph: nn-sim-graph
 
 install:
 	$(PIP) install -r requirements.txt
@@ -377,6 +393,17 @@ nn-sim: dirs
 	@echo "Sequence NN daily bank report: $(NN_SIM_REPORT)"
 	@echo "Sequence NN daily bank trades: $(NN_SIM_TRADES)"
 
+nn-sim-visualize: dirs
+	$(PYTHON) src/visualize_sim.py \
+		--raw-data $(RAW_DATA) \
+		--trades $(NN_SIM_TRADES) \
+		--report $(NN_SIM_REPORT) \
+		--output $(NN_SIM_VISUALIZATION_OUT) \
+		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
+		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
+		--title "$(SYMBOL) $(INTERVAL) Sequence NN Bank Simulation"
+	@echo "Sequence NN simulation visualization: $(NN_SIM_VISUALIZATION_OUT)"
+
 lr-diagnostic: dirs
 	$(PYTHON) src/diagnostic_report.py \
 		--features $(FEATURES_DATA) \
@@ -416,6 +443,17 @@ lr-sim: dirs
 	@echo "Daily bank report: $(SIM_REPORT)"
 	@echo "Daily bank trades: $(SIM_TRADES)"
 
+lr-sim-visualize: dirs
+	$(PYTHON) src/visualize_sim.py \
+		--raw-data $(RAW_DATA) \
+		--trades $(SIM_TRADES) \
+		--report $(SIM_REPORT) \
+		--output $(SIM_VISUALIZATION_OUT) \
+		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
+		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
+		--title "$(SYMBOL) $(INTERVAL) Logistic Regression Bank Simulation"
+	@echo "Daily bank visualization: $(SIM_VISUALIZATION_OUT)"
+
 day-sim: sim
 
 serve-reports:
@@ -423,7 +461,7 @@ serve-reports:
 
 nn-graph: nn-visualize
 	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_VISUALIZATION_FILE)"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_VISUALIZATION_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 nn-serve-lan: nn-graph
@@ -434,12 +472,22 @@ graph: nn-graph
 
 serve-lan: graph
 
+nn-sim-graph: nn-sim-visualize
+	@echo "Open this on your other laptop:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_SIM_VISUALIZATION_URL_PATH)"
+	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
+
 lr-graph: lr-visualize
 	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(VISUALIZATION_FILE)"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(VISUALIZATION_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 lr-serve-lan: lr-graph
+
+lr-sim-graph: lr-sim-visualize
+	@echo "Open this on your other laptop:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(SIM_VISUALIZATION_URL_PATH)"
+	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 lr-sweep: dirs
 	$(PYTHON) src/sweep.py \

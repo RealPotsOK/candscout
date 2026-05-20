@@ -41,6 +41,7 @@ make backtest
 make experiment
 make visualize
 make sim
+make sim-visualize
 ```
 
 `lr` targets use the older feature-based logistic regression pipeline:
@@ -55,3 +56,5 @@ make lr-experiment
 ## Notes
 
 Existing generated files in older flat paths are left in place. They are not moved automatically. Future default runs write to the organized paths unless a Makefile variable override is provided.
+
+The model visualization and simulation visualization are separate HTML pages. The simulation page uses the bank simulator CSV and JSON report to show trade markers plus active capital invested over time.

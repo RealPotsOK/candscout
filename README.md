@@ -47,10 +47,22 @@ Run the bank-account simulator from existing predictions:
 make sim
 ```
 
+Create a separate bank simulation visualization:
+
+```bash
+make sim-visualize
+```
+
 Serve the visualization on the LAN:
 
 ```bash
 make graph
+```
+
+Serve the simulation visualization on the LAN:
+
+```bash
+make sim-graph
 ```
 
 Run the older logistic-regression pipeline:
@@ -84,6 +96,13 @@ Prediction-only research with no fee model:
 
 ```bash
 make experiment EDGE=0 FEE=0
+```
+
+Simulation visualization options:
+
+```bash
+make sim-visualize SIM_ACTIVITY_BUCKET=hour SIM_MARKER_SIZE_BASIS=usd
+make sim-visualize SIM_ACTIVITY_BUCKET=day SIM_MARKER_SIZE_BASIS=coin
 ```
 
 ## GitHub Publishing
