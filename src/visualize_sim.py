@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
         help="Scale trade markers by investment USD or coin amount",
     )
     parser.add_argument("--title", default="Bank Simulation Visualization", help="Report title")
+    parser.add_argument("--nav-home-url", default="/", help="Header home/index URL")
+    parser.add_argument("--nav-model-url", default="", help="Header model visualization URL")
+    parser.add_argument("--nav-sim-url", default="", help="Header simulation visualization URL")
     return parser.parse_args()
 
 
@@ -262,7 +265,23 @@ def summarize(report: dict, trades: pd.DataFrame, activity: pd.DataFrame, marker
     }
 
 
-def html_template(title: str, data: dict) -> str:
+def nav_html(home_url: str, model_url: str, sim_url: str, active: str) -> str:
+    items = [("Home", home_url, "home"), ("Model", model_url, "model"), ("Simulation", sim_url, "sim")]
+    links = []
+    for label, url, key in items:
+        if not url:
+            continue
+        css_class = "active" if key == active else ""
+        links.append(
+            f'<a class="{css_class}" href="{html_lib.escape(url, quote=True)}">'
+            f"{html_lib.escape(label)}</a>"
+        )
+    if not links:
+        return ""
+    return '<nav class="site-nav">' + "".join(links) + "</nav>"
+
+
+def html_template(title: str, data: dict, nav: str) -> str:
     payload = json.dumps(data, separators=(",", ":"))
     title_text = html_lib.escape(title)
     template = """<!doctype html>
@@ -297,6 +316,28 @@ def html_template(title: str, data: dict) -> str:
     h1 {
       margin: 0 0 8px;
       font-size: 25px;
+    }
+    .site-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 10px;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+    }
+    .site-nav a {
+      color: var(--ink);
+      text-decoration: none;
+      border: 1px solid #beb69f;
+      background: rgba(255, 255, 255, 0.72);
+      padding: 6px 9px;
+      border-radius: 4px;
+    }
+    .site-nav a:hover,
+    .site-nav a.active {
+      color: #fffdf6;
+      background: var(--ink);
+      border-color: var(--ink);
     }
     .summary {
       display: flex;
@@ -360,6 +401,7 @@ def html_template(title: str, data: dict) -> str:
 <body>
   <header>
     <h1>__TITLE__</h1>
+    __NAV__
     <div id="summary" class="summary"></div>
   </header>
   <main>
@@ -735,7 +777,7 @@ def html_template(title: str, data: dict) -> str:
 </body>
 </html>
 """
-    return template.replace("__TITLE__", title_text).replace("__PAYLOAD__", payload)
+    return template.replace("__TITLE__", title_text).replace("__NAV__", nav).replace("__PAYLOAD__", payload)
 
 
 def build_report(
@@ -746,6 +788,9 @@ def build_report(
     activity_bucket: str,
     marker_size_basis: str,
     title: str,
+    nav_home_url: str,
+    nav_model_url: str,
+    nav_sim_url: str,
 ) -> None:
     candles = load_candles(raw_data)
     trades = load_trades(trades_path)
@@ -764,7 +809,8 @@ def build_report(
     }
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(html_template(title, data), encoding="utf-8")
+    nav = nav_html(nav_home_url, nav_model_url, nav_sim_url, active="sim")
+    output.write_text(html_template(title, data, nav), encoding="utf-8")
 
 
 def main() -> None:
@@ -777,6 +823,9 @@ def main() -> None:
         activity_bucket=args.activity_bucket,
         marker_size_basis=args.marker_size_basis,
         title=args.title,
+        nav_home_url=args.nav_home_url,
+        nav_model_url=args.nav_model_url,
+        nav_sim_url=args.nav_sim_url,
     )
     print(f"Saved simulation visualization to {args.output}")
 

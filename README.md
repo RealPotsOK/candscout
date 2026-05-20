@@ -59,6 +59,12 @@ Serve the visualization on the LAN:
 make graph
 ```
 
+Create the report server home page:
+
+```bash
+make reports-index
+```
+
 Serve the simulation visualization on the LAN:
 
 ```bash

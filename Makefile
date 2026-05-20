@@ -22,6 +22,7 @@ VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(VISUALIZATION_OUT))
 VISUALIZATION_FILE ?= $(notdir $(VISUALIZATION_OUT))
 NN_SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(NN_SIM_VISUALIZATION_OUT))
 SIM_VISUALIZATION_URL_PATH ?= $(patsubst data/reports/%,%,$(SIM_VISUALIZATION_OUT))
+REPORTS_INDEX_URL_PATH ?= $(patsubst data/reports/%,%,$(REPORTS_INDEX_OUT))
 
 GENERATED_DIRS := $(sort $(dir \
 	$(RAW_DATA) \
@@ -29,11 +30,11 @@ GENERATED_DIRS := $(sort $(dir \
 	$(MODEL_OUT) $(TRAIN_METRICS) $(BACKTEST_REPORT) $(PREDICTIONS_OUT) \
 	$(NN_MODEL_OUT) $(NN_TRAIN_METRICS) $(NN_BACKTEST_REPORT) $(NN_PREDICTIONS_OUT) $(NN_VISUALIZATION_OUT) \
 	$(DIAG_REPORT) $(DIAG_TABLE) $(DIAG_TEST_PREDICTIONS) $(SWEEP_OUTPUT_DIR)/ $(VISUALIZATION_OUT) \
-	$(SIM_REPORT) $(SIM_TRADES) $(SIM_VISUALIZATION_OUT) $(NN_SIM_REPORT) $(NN_SIM_TRADES) $(NN_SIM_VISUALIZATION_OUT) \
+	$(SIM_REPORT) $(SIM_TRADES) $(SIM_VISUALIZATION_OUT) $(NN_SIM_REPORT) $(NN_SIM_TRADES) $(NN_SIM_VISUALIZATION_OUT) $(REPORTS_INDEX_OUT) \
 ))
 
 
-.PHONY: help install dirs download nn train backtest experiment diagnostic sweep visualize sim sim-visualize sim-graph day-sim serve-reports graph serve-lan preflight run clean smoke repo-status
+.PHONY: help install dirs download nn train backtest experiment diagnostic sweep visualize sim sim-visualize sim-graph reports-index day-sim serve-reports graph serve-lan preflight run clean smoke repo-status
 .PHONY: github-check github-init github-commit github-create-private github-push github-publish
 .PHONY: nn-train nn-backtest nn-experiment nn-diagnostic nn-visualize nn-sim nn-sim-visualize nn-sim-graph nn-graph nn-serve-lan nn-servre-lan
 .PHONY: lr-features lr-train lr-backtest lr-experiment lr-diagnostic lr-sweep lr-visualize lr-sim lr-sim-visualize lr-sim-graph lr-graph lr-serve-lan lr-preflight
@@ -54,6 +55,7 @@ help:
 	@echo "  make sim          - simulate bank-account trades from sequence neural net predictions"
 	@echo "  make sim-visualize - create bank simulation HTML visualization"
 	@echo "  make sim-graph    - serve bank simulation HTML visualization on LAN"
+	@echo "  make reports-index - create data/reports/index.html navigation page"
 	@echo "  make graph    - serve sequence neural net report on LAN"
 	@echo "  make serve-lan    - alias for make graph"
 	@echo "  make run          - run default sequence neural net pipeline -> serve LAN report"
@@ -297,7 +299,10 @@ nn-visualize: dirs
 		--threshold $(THRESHOLD) \
 		--fee $(FEE) \
 		--starting-cash $(VIS_STARTING_CASH) \
-		--title "$(SYMBOL) $(INTERVAL) Sequence NN Inspection"
+		--title "$(SYMBOL) $(INTERVAL) Sequence NN Inspection" \
+		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
+		--nav-model-url /$(NN_VISUALIZATION_URL_PATH) \
+		--nav-sim-url /$(NN_SIM_VISUALIZATION_URL_PATH)
 	@echo "Sequence NN visualization: $(NN_VISUALIZATION_OUT)"
 
 nn-sim: dirs
@@ -322,7 +327,10 @@ nn-sim-visualize: dirs
 		--output $(NN_SIM_VISUALIZATION_OUT) \
 		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
 		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--title "$(SYMBOL) $(INTERVAL) Sequence NN Bank Simulation"
+		--title "$(SYMBOL) $(INTERVAL) Sequence NN Bank Simulation" \
+		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
+		--nav-model-url /$(NN_VISUALIZATION_URL_PATH) \
+		--nav-sim-url /$(NN_SIM_VISUALIZATION_URL_PATH)
 	@echo "Sequence NN simulation visualization: $(NN_SIM_VISUALIZATION_OUT)"
 
 lr-diagnostic: dirs
@@ -347,7 +355,10 @@ lr-visualize: dirs
 		--threshold $(THRESHOLD) \
 		--fee $(FEE) \
 		--starting-cash $(VIS_STARTING_CASH) \
-		--title "$(SYMBOL) $(INTERVAL) Model Inspection"
+		--title "$(SYMBOL) $(INTERVAL) Model Inspection" \
+		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
+		--nav-model-url /$(VISUALIZATION_URL_PATH) \
+		--nav-sim-url /$(SIM_VISUALIZATION_URL_PATH)
 	@echo "Visualization: $(VISUALIZATION_OUT)"
 
 lr-sim: dirs
@@ -372,7 +383,10 @@ lr-sim-visualize: dirs
 		--output $(SIM_VISUALIZATION_OUT) \
 		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
 		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--title "$(SYMBOL) $(INTERVAL) Logistic Regression Bank Simulation"
+		--title "$(SYMBOL) $(INTERVAL) Logistic Regression Bank Simulation" \
+		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
+		--nav-model-url /$(VISUALIZATION_URL_PATH) \
+		--nav-sim-url /$(SIM_VISUALIZATION_URL_PATH)
 	@echo "Daily bank visualization: $(SIM_VISUALIZATION_OUT)"
 
 day-sim: sim
@@ -380,9 +394,21 @@ day-sim: sim
 serve-reports:
 	cd data/reports && $(PYTHON) -m http.server $(REPORTS_PORT) --bind 127.0.0.1
 
-nn-graph: nn-visualize
+reports-index: dirs
+	$(PYTHON) src/report_index.py \
+		--output $(REPORTS_INDEX_OUT) \
+		--title "$(PROJECT_NAME) reports" \
+		--model-url /$(NN_VISUALIZATION_URL_PATH) \
+		--sim-url /$(NN_SIM_VISUALIZATION_URL_PATH) \
+		--lr-model-url /$(VISUALIZATION_URL_PATH) \
+		--lr-sim-url /$(SIM_VISUALIZATION_URL_PATH)
+	@echo "Reports index: $(REPORTS_INDEX_OUT)"
+
+nn-graph: nn-visualize reports-index
 	@echo "Open this on your other laptop:"
 	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_VISUALIZATION_URL_PATH)"
+	@echo "Report index:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 nn-serve-lan: nn-graph
@@ -393,21 +419,27 @@ graph: nn-graph
 
 serve-lan: graph
 
-nn-sim-graph: nn-sim-visualize
+nn-sim-graph: nn-sim-visualize reports-index
 	@echo "Open this on your other laptop:"
 	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_SIM_VISUALIZATION_URL_PATH)"
+	@echo "Report index:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
-lr-graph: lr-visualize
+lr-graph: lr-visualize reports-index
 	@echo "Open this on your other laptop:"
 	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(VISUALIZATION_URL_PATH)"
+	@echo "Report index:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 lr-serve-lan: lr-graph
 
-lr-sim-graph: lr-sim-visualize
+lr-sim-graph: lr-sim-visualize reports-index
 	@echo "Open this on your other laptop:"
 	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(SIM_VISUALIZATION_URL_PATH)"
+	@echo "Report index:"
+	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
 	$(PYTHON) -m http.server $(REPORTS_PORT) --bind $(REPORTS_HOST) --directory data/reports
 
 lr-sweep: dirs
