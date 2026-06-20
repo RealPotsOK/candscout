@@ -1,0 +1,17 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+.env
+.env.*
+env/local.env
+*.log
+
+data
+models
+live_sim/.env
+live_sim/state

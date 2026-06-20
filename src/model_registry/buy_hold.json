@@ -1,0 +1,287 @@
+{
+  "id": "buy_hold",
+  "label": "Buy and Hold",
+  "complexity_rank": 10,
+  "complexity_group": "Baselines",
+  "description": "Rule baseline: buy once at the start of the evaluated period and hold until the end.",
+  "family": "strategy",
+  "model_type": "buy_hold",
+  "backend": "rule_based",
+  "preset": "recommended_v1",
+  "actions": {
+    "train": [
+      "download",
+      "strategy-experiment"
+    ],
+    "visualize": [
+      "strategy-visualize",
+      "reports-index"
+    ],
+    "simulate": [
+      "strategy-sim",
+      "strategy-sim-visualize",
+      "reports-index"
+    ],
+    "full": [
+      "download",
+      "strategy-experiment",
+      "strategy-visualize",
+      "strategy-sim",
+      "strategy-sim-visualize",
+      "reports-index"
+    ]
+  },
+  "links": {
+    "model": "/strategy/{STRATEGY_MODEL_TYPE}/{DATA_SOURCE}/{SYMBOL}/{INTERVAL}/visualization.html",
+    "simulation": "/sim/strategy/{STRATEGY_MODEL_TYPE}/{DATA_SOURCE}/{SYMBOL}/{INTERVAL}/visualization.html"
+  },
+  "defaults": {
+    "DATA_SOURCE": "binance",
+    "SYMBOL": "SOLUSDT",
+    "INTERVAL": "3m",
+    "START": "2023-11-18T00:00:00Z",
+    "END": "2026-05-18T00:00:00Z",
+    "SPLIT": "0.9",
+    "EDGE": "0",
+    "FEE": "0.0001",
+    "THRESHOLD": "0.55",
+    "EXIT_THRESHOLD": "0.48",
+    "POSITION_MODE": "hold",
+    "STRATEGY_MODEL_TYPE": "buy_hold",
+    "STRATEGY_MA_WINDOW": "20",
+    "SIM_STARTING_CASH": "10000",
+    "SIM_MIN_INVEST": "2500",
+    "SIM_MAX_INVEST": "8000",
+    "SIM_CONFIDENCE_MULTIPLIER": "1.0",
+    "TRADE_MODE": "long_only",
+    "SHORT_ENTRY_THRESHOLD": "0.55",
+    "SHORT_EXIT_THRESHOLD": "0.48",
+    "SIM_MAX_SHORT_INVEST": "8000",
+    "ALLOW_FLIP_POSITION": "0",
+    "BORROW_FEE": "0",
+    "SIM_SLIPPAGE": "0",
+    "STOP_LOSS": "0.02",
+    "TAKE_PROFIT": "0.04",
+    "MAX_HOLD_BARS": "60",
+    "LEVERAGE": "1",
+    "LIQUIDATION_SIMULATION": "off",
+    "SIM_SHORT_CONFIDENCE_MULTIPLIER": "3.0",
+    "SHORT_EDGE": "0"
+  },
+  "fields": [
+    {
+      "name": "DATA_SOURCE",
+      "label": "Data Source",
+      "type": "select",
+      "options": [
+        "binance",
+        "yahoo"
+      ],
+      "section": "data"
+    },
+    {
+      "name": "SYMBOL",
+      "label": "Symbol",
+      "type": "text",
+      "section": "data"
+    },
+    {
+      "name": "INTERVAL",
+      "label": "Interval",
+      "type": "text",
+      "section": "data"
+    },
+    {
+      "name": "START",
+      "label": "Start UTC",
+      "type": "text",
+      "section": "data"
+    },
+    {
+      "name": "END",
+      "label": "End UTC",
+      "type": "text",
+      "section": "data"
+    },
+    {
+      "name": "SPLIT",
+      "label": "Train Split",
+      "type": "number",
+      "step": "0.01",
+      "section": "data"
+    },
+    {
+      "name": "EDGE",
+      "label": "Label Edge",
+      "type": "number",
+      "step": "0.0001",
+      "section": "data"
+    },
+    {
+      "name": "SHORT_EDGE",
+      "label": "Short Label Edge",
+      "type": "number",
+      "step": "0.0001",
+      "section": "data"
+    },
+    {
+      "name": "TRADE_MODE",
+      "label": "Trade Mode",
+      "type": "select",
+      "section": "trading",
+      "options": [
+        "long_only",
+        "short_only",
+        "long_short"
+      ]
+    },
+    {
+      "name": "THRESHOLD",
+      "label": "Long Entry Threshold",
+      "type": "number",
+      "section": "trading",
+      "step": "0.01"
+    },
+    {
+      "name": "EXIT_THRESHOLD",
+      "label": "Long Exit Threshold",
+      "type": "number",
+      "section": "trading",
+      "step": "0.01"
+    },
+    {
+      "name": "SHORT_ENTRY_THRESHOLD",
+      "label": "Short Entry Threshold",
+      "type": "number",
+      "section": "trading",
+      "step": "0.01"
+    },
+    {
+      "name": "SHORT_EXIT_THRESHOLD",
+      "label": "Short Exit / Cover Threshold",
+      "type": "number",
+      "section": "trading",
+      "step": "0.01"
+    },
+    {
+      "name": "FEE",
+      "label": "Fee Per Side",
+      "type": "number",
+      "section": "trading",
+      "step": "0.00001"
+    },
+    {
+      "name": "SIM_STARTING_CASH",
+      "label": "Starting Cash",
+      "type": "number",
+      "section": "trading",
+      "step": "1"
+    },
+    {
+      "name": "SIM_MIN_INVEST",
+      "label": "Min Trade",
+      "type": "number",
+      "section": "trading",
+      "step": "1"
+    },
+    {
+      "name": "SIM_MAX_INVEST",
+      "label": "Max Long Trade",
+      "type": "text",
+      "section": "trading"
+    },
+    {
+      "name": "SIM_MAX_SHORT_INVEST",
+      "label": "Max Short Trade",
+      "type": "text",
+      "section": "trading"
+    },
+    {
+      "name": "SIM_CONFIDENCE_MULTIPLIER",
+      "label": "Confidence Multiplier",
+      "type": "number",
+      "section": "trading",
+      "step": "0.1"
+    },
+    {
+      "name": "SIM_SHORT_CONFIDENCE_MULTIPLIER",
+      "label": "Short Confidence Multiplier",
+      "type": "number",
+      "section": "trading",
+      "step": "0.1"
+    },
+    {
+      "name": "ALLOW_FLIP_POSITION",
+      "label": "Allow Flip Long / Short",
+      "type": "select",
+      "section": "advanced",
+      "options": [
+        "0",
+        "1"
+      ]
+    },
+    {
+      "name": "BORROW_FEE",
+      "label": "Borrow / Funding Fee Per Bar",
+      "type": "number",
+      "section": "advanced",
+      "step": "0.000001"
+    },
+    {
+      "name": "SIM_SLIPPAGE",
+      "label": "Slippage Per Side",
+      "type": "number",
+      "section": "advanced",
+      "step": "0.00001"
+    },
+    {
+      "name": "STOP_LOSS",
+      "label": "Stop Loss",
+      "type": "number",
+      "section": "advanced",
+      "step": "0.0001"
+    },
+    {
+      "name": "TAKE_PROFIT",
+      "label": "Take Profit",
+      "type": "number",
+      "section": "advanced",
+      "step": "0.0001"
+    },
+    {
+      "name": "MAX_HOLD_BARS",
+      "label": "Max Holding Bars",
+      "type": "number",
+      "section": "advanced",
+      "step": "1"
+    },
+    {
+      "name": "LEVERAGE",
+      "label": "Leverage (1x Only)",
+      "type": "number",
+      "section": "advanced",
+      "step": "1"
+    },
+    {
+      "name": "LIQUIDATION_SIMULATION",
+      "label": "Liquidation Simulation",
+      "type": "select",
+      "section": "advanced",
+      "options": [
+        "off",
+        "basic"
+      ]
+    },
+    {
+      "name": "STRATEGY_MODEL_TYPE",
+      "label": "Strategy Type",
+      "type": "select",
+      "options": [
+        "buy_hold",
+        "prev_movement",
+        "ma"
+      ],
+      "section": "model"
+    }
+  ]
+}

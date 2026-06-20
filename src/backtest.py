@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Trained model .npz path")
     parser.add_argument("--fee", type=float, default=0.001, help="Per-side fee rate (default: 0.001 = 0.10%%)")
     parser.add_argument("--threshold", type=float, default=0.55, help="Probability threshold for long signal")
+    parser.add_argument("--split", type=float, default=0.8, help="Chronological train fraction")
     parser.add_argument(
         "--position-mode",
         choices=["one_bar", "hold"],
@@ -66,6 +67,20 @@ def bars_per_year_from_seconds(bar_seconds: float) -> int:
     if bar_seconds <= 0.0:
         return 105_120
     return int(round((365.0 * 24.0 * 60.0 * 60.0) / bar_seconds))
+
+
+def chronological_split_index(n_rows: int, split: float) -> int:
+    if n_rows < 2:
+        raise ValueError("Need at least two rows for a chronological split")
+    if not 0.0 < split < 1.0:
+        raise ValueError("--split must be between 0 and 1")
+    return max(1, min(n_rows - 1, int(n_rows * split)))
+
+
+def dataset_split_labels(n_rows: int, split_idx: int) -> np.ndarray:
+    labels = np.full(n_rows, "train", dtype=object)
+    labels[split_idx:] = "test"
+    return labels
 
 
 def annualized_return(total_return: float, bars: int, bars_per_year: int) -> float:
@@ -295,6 +310,8 @@ def main() -> None:
     model = np.load(args.model)
     weights = model["weights"]
     bias = float(model["bias"][0])
+    weights_down = model["weights_down"] if "weights_down" in model.files else None
+    bias_down = float(model["bias_down"][0]) if "bias_down" in model.files else None
     feature_names = [str(x) for x in model["feature_names"]]
     mean = model["mean"]
     std = model["std"]
@@ -306,12 +323,24 @@ def main() -> None:
     x = features_df[feature_names].to_numpy(dtype=np.float64)
     x_norm = (x - mean) / std
     probs = sigmoid(x_norm @ weights + bias)
+    probs_down = (
+        sigmoid(x_norm @ weights_down + bias_down)
+        if weights_down is not None and bias_down is not None
+        else np.zeros(len(features_df), dtype=np.float64)
+    )
 
     model_signal = (probs >= args.threshold).astype(int)
     predicted_class_at_050 = (probs >= 0.50).astype(int)
     forward_returns = features_df[forward_return_col].to_numpy(dtype=np.float64)
     targets = features_df["target"].to_numpy(dtype=np.int64)
+    target_up = features_df["target_up"].to_numpy(dtype=np.int64) if "target_up" in features_df.columns else targets
+    if "target_down" in features_df.columns:
+        target_down = features_df["target_down"].to_numpy(dtype=np.int64)
+    else:
+        target_down = np.zeros(len(features_df), dtype=np.int64)
     closes = features_df["close"].to_numpy(dtype=np.float64)
+    split_idx = chronological_split_index(len(features_df), args.split)
+    eval_slice = slice(split_idx, None)
 
     scores = {
         "logistic_regression": probs,
@@ -336,8 +365,13 @@ def main() -> None:
             "bars_per_year": int(bars_per_year),
             "forward_return_column": forward_return_col,
             "one_bar_return_column": one_bar_return_col,
+            "dual_model": bool(weights_down is not None),
         },
         "rows": int(len(features_df)),
+        "evaluation_rows": int(len(features_df) - split_idx),
+        "evaluation_split": "chronological_test",
+        "split_fraction": float(args.split),
+        "test_start_open_time": str(features_df["open_time"].iloc[split_idx]),
         "backtest": {},
     }
 
@@ -350,9 +384,9 @@ def main() -> None:
         )
         for name, signal_array in signals.items():
             report["backtest"][name] = simulate_independent_one_bar_trades(
-                signals=signal_array,
-                targets=targets,
-                forward_returns=forward_returns,
+                signals=signal_array[eval_slice],
+                targets=targets[eval_slice],
+                forward_returns=forward_returns[eval_slice],
                 fee=args.fee,
                 bars_per_year=bars_per_year,
             )
@@ -362,10 +396,10 @@ def main() -> None:
             "take profit, max hold, or end of data"
         )
         for name, score_array in scores.items():
-            result, arrays = simulate_hold_positions(
-                scores=score_array.astype(np.float64),
-                closes=closes,
-                targets=targets,
+            result, _arrays = simulate_hold_positions(
+                scores=score_array[eval_slice].astype(np.float64),
+                closes=closes[eval_slice],
+                targets=targets[eval_slice],
                 fee=args.fee,
                 entry_threshold=args.threshold,
                 exit_threshold=args.exit_threshold,
@@ -375,8 +409,18 @@ def main() -> None:
                 bars_per_year=bars_per_year,
             )
             report["backtest"][name] = result
-            if name == "logistic_regression":
-                model_position_arrays = arrays
+        _, model_position_arrays = simulate_hold_positions(
+            scores=probs,
+            closes=closes,
+            targets=targets,
+            fee=args.fee,
+            entry_threshold=args.threshold,
+            exit_threshold=args.exit_threshold,
+            max_hold_bars=args.max_hold_bars,
+            stop_loss=args.stop_loss,
+            take_profit=args.take_profit,
+            bars_per_year=bars_per_year,
+        )
 
     out_path = Path(args.report_out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -389,10 +433,14 @@ def main() -> None:
             "open_time": features_df["open_time"],
             "close": features_df["close"],
             "target": features_df["target"].astype(int),
+            "target_up": target_up.astype(int),
+            "target_down": target_down.astype(int),
             "forward_return": features_df[forward_return_col],
             "prob_up": probs,
+            "prob_down": probs_down,
             "predicted_class_at_0_50": predicted_class_at_050,
             "signal_at_threshold": model_signal,
+            "dataset_split": dataset_split_labels(len(features_df), split_idx),
         }
     )
 

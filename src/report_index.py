@@ -16,6 +16,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-url", required=True, help="Simulation visualization URL path")
     parser.add_argument("--lr-model-url", default="", help="Optional LR model visualization URL path")
     parser.add_argument("--lr-sim-url", default="", help="Optional LR simulation visualization URL path")
+    parser.add_argument("--xgb-model-url", default="", help="Optional XGBoost model visualization URL path")
+    parser.add_argument("--xgb-sim-url", default="", help="Optional XGBoost simulation visualization URL path")
+    parser.add_argument("--strategy-model-url", default="", help="Optional rule strategy model visualization URL path")
+    parser.add_argument("--strategy-sim-url", default="", help="Optional rule strategy simulation visualization URL path")
     return parser.parse_args()
 
 
@@ -36,10 +40,14 @@ def link(label: str, url: str, description: str) -> str:
 def build_html(args: argparse.Namespace) -> str:
     title = html.escape(args.title)
     cards = [
-        link("Model Visualization", args.model_url, "Price, predictions, outcomes, equity vs buy-and-hold"),
-        link("Simulation Visualization", args.sim_url, "Bank simulation trades and active invested dollars"),
+        link("Strategy Model Visualization", args.strategy_model_url, "Least-complex rule strategy visualization"),
+        link("Strategy Simulation Visualization", args.strategy_sim_url, "Rule strategy bank simulation on the test split"),
         link("LR Model Visualization", args.lr_model_url, "Older logistic-regression visualization"),
         link("LR Simulation Visualization", args.lr_sim_url, "Older logistic-regression bank simulation"),
+        link("XGBoost Model Visualization", args.xgb_model_url, "Tree-boosted tabular feature model visualization"),
+        link("XGBoost Simulation Visualization", args.xgb_sim_url, "XGBoost bank simulation on the test split"),
+        link("Sequence Model Visualization", args.model_url, "MLP, CNN, GRU, LSTM, or Transformer price, predictions, outcomes, and equity"),
+        link("Sequence Simulation Visualization", args.sim_url, "Sequence-model bank simulation and active invested dollars"),
     ]
     cards_html = "\n".join(card for card in cards if card)
     return f"""<!doctype html>
@@ -102,10 +110,18 @@ def build_html(args: argparse.Namespace) -> str:
       line-height: 1.35;
     }}
   </style>
+  <link rel="stylesheet" href="/assets/cryptopred.css">
 </head>
 <body>
   <header>
     <h1>{title}</h1>
+    <nav class="site-nav">
+      <a class="active" href="/">Dashboard</a>
+      <a href="/models">Models</a>
+      <a href="/compare">Compare</a>
+      <a href="/reports">Reports</a>
+      <a href="/live">Live</a>
+    </nav>
     <p>Local report navigation for the current generated experiment outputs.</p>
   </header>
   <main>

@@ -1,0 +1,131 @@
+:root {
+  --cp-bg: #f4efe4;
+  --cp-bg-2: #e8ded0;
+  --cp-paper: #fffaf0;
+  --cp-paper-strong: #fffdf8;
+  --cp-ink: #15120d;
+  --cp-muted: #6b6256;
+  --cp-line: #d8c8ad;
+  --cp-accent: #164f45;
+  --cp-orange: #c77519;
+  --cp-red: #b23834;
+  --cp-blue: #245ea8;
+  --cp-green: #16864e;
+  --cp-shadow: 0 12px 30px rgba(45, 38, 24, 0.08);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--cp-ink);
+  background: radial-gradient(circle at 5% 0%, #fff2bd 0, var(--cp-bg) 32%, var(--cp-bg-2) 100%);
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+header,
+.cp-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--cp-line);
+  background: rgba(255, 250, 240, 0.94);
+  backdrop-filter: blur(8px);
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 26px;
+  letter-spacing: -0.04em;
+}
+
+.cp-subhead,
+.muted,
+.hint {
+  color: var(--cp-muted);
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+nav,
+.site-nav,
+.cp-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+}
+
+nav a,
+.site-nav a,
+.cp-nav a,
+button,
+.button {
+  border: 1px solid var(--cp-line);
+  background: var(--cp-paper-strong);
+  color: var(--cp-ink);
+  padding: 8px 12px;
+  border-radius: 999px;
+  text-decoration: none;
+  cursor: pointer;
+  font: 13px "Courier New", monospace;
+}
+
+nav a:hover,
+.site-nav a:hover,
+.cp-nav a:hover,
+nav a.active,
+.site-nav a.active,
+.cp-nav a.active,
+button.primary,
+.button.primary {
+  background: var(--cp-accent);
+  color: #fff;
+  border-color: var(--cp-accent);
+}
+
+button.danger,
+.button.danger {
+  background: var(--cp-red);
+  color: #fff;
+  border-color: var(--cp-red);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.card,
+.panel {
+  border: 1px solid var(--cp-line);
+  background: rgba(255, 250, 240, 0.9);
+  box-shadow: var(--cp-shadow);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.summary span {
+  border: 1px solid var(--cp-line);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 5px 8px;
+  border-radius: 999px;
+}
+
+@media (max-width: 900px) {
+  header,
+  .cp-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

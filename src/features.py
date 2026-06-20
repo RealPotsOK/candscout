@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         help="Positive class edge on next-candle return (default: 0.002 = 0.20%%)",
     )
     parser.add_argument(
+        "--short-edge",
+        type=float,
+        default=None,
+        help="Short class edge on next-candle return. Defaults to --edge.",
+    )
+    parser.add_argument(
         "--interval",
         default="5m",
         help="Candle interval label used for metadata (default: 5m)",
@@ -100,6 +106,7 @@ def load_raw_data(path: Path) -> pd.DataFrame:
 def build_features(
     df: pd.DataFrame,
     edge: float,
+    short_edge: float | None,
     return_windows: list[int],
     vol_windows: list[int],
     sma_short_window: int,
@@ -115,6 +122,7 @@ def build_features(
         raise ValueError("--sma-short-window must be smaller than --sma-long-window")
 
     out = df.copy()
+    short_edge_value = edge if short_edge is None else short_edge
 
     # Baseline helper columns expected by train/backtest logic.
     out["return_1bar"] = out["close"].pct_change(1)
@@ -206,12 +214,21 @@ def build_features(
 
     # Forward-looking value used only for label and backtest PnL construction.
     out["forward_return"] = out["close"].shift(-1) / out["close"] - 1.0
-    out["target"] = (out["forward_return"] > edge).astype(int)
+    out["target_up"] = (out["forward_return"] > edge).astype(int)
+    out["target_down"] = (out["forward_return"] < -short_edge_value).astype(int)
+    out["target"] = out["target_up"]
 
     # De-duplicate feature name list if any overlap occurs.
     feature_columns = list(dict.fromkeys(feature_columns))
 
-    required_cols = feature_columns + ["forward_return", "target", "return_1bar", "sma_spread"]
+    required_cols = feature_columns + [
+        "forward_return",
+        "target",
+        "target_up",
+        "target_down",
+        "return_1bar",
+        "sma_spread",
+    ]
     out = out.replace([np.inf, -np.inf], np.nan)
     out = out.dropna(subset=required_cols).reset_index(drop=True)
 
@@ -249,6 +266,7 @@ def main() -> None:
     features_df, feature_columns, feature_config = build_features(
         df,
         edge=args.edge,
+        short_edge=args.short_edge,
         return_windows=return_windows,
         vol_windows=vol_windows,
         sma_short_window=args.sma_short_window,
@@ -266,19 +284,23 @@ def main() -> None:
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
         "edge": float(args.edge),
+        "short_edge": float(args.edge if args.short_edge is None else args.short_edge),
         "interval": str(args.interval),
         "target_horizon_bars": 1,
-        "target_definition": "target=1 when next-candle forward_return > edge, else 0",
+        "target_definition": "target/target_up=1 when next-candle forward_return > edge, else 0",
+        "target_down_definition": "target_down=1 when next-candle forward_return < -short_edge, else 0",
         "feature_columns": feature_columns,
         "feature_config": feature_config,
     }
     meta_path.write_text(json.dumps(metadata, indent=2))
 
     positive_rate = float(features_df["target"].mean())
+    down_rate = float(features_df["target_down"].mean())
     print(f"Saved {len(features_df)} feature rows to {output_path}")
     print(f"Saved feature metadata to {meta_path}")
     print(f"Positive class rate (y=1): {positive_rate:.6f}")
     print(f"Negative class rate (y=0): {1.0 - positive_rate:.6f}")
+    print(f"Down class rate (target_down=1): {down_rate:.6f}")
     print(f"Feature columns used ({len(feature_columns)}): {feature_columns}")
 
 

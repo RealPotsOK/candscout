@@ -161,6 +161,182 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> list
     return all_rows
 
 
+def load_existing_candles(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    frame = pd.read_parquet(path)
+    if frame.empty:
+        return pd.DataFrame()
+    return normalize_cached_frame(frame)
+
+
+def normalize_cached_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    if "open_time" not in frame.columns and "open_time_ms" not in frame.columns:
+        raise ValueError("Cached candles must contain open_time or open_time_ms")
+
+    if "open_time" not in frame.columns:
+        frame["open_time"] = pd.to_datetime(frame["open_time_ms"], unit="ms", utc=True)
+    else:
+        frame["open_time"] = pd.to_datetime(frame["open_time"], utc=True)
+
+    if "open_time_ms" not in frame.columns:
+        frame["open_time_ms"] = (frame["open_time"].astype("int64") // 1_000_000).astype("int64")
+    else:
+        frame["open_time_ms"] = pd.to_numeric(frame["open_time_ms"], errors="coerce").astype("Int64")
+
+    frame = frame.dropna(subset=["open_time", "open_time_ms"])
+    frame = frame.drop_duplicates("open_time_ms").sort_values("open_time_ms").reset_index(drop=True)
+    return frame
+
+
+def merge_candles(*frames: pd.DataFrame) -> pd.DataFrame:
+    valid = [normalize_cached_frame(frame) for frame in frames if frame is not None and not frame.empty]
+    if not valid:
+        return pd.DataFrame()
+    merged = pd.concat(valid, ignore_index=True, sort=False)
+    merged = normalize_cached_frame(merged)
+    return merged
+
+
+def filter_by_open_time_ms(frame: pd.DataFrame, start_ms: int, end_ms: int) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    normalized = normalize_cached_frame(frame)
+    out = normalized[(normalized["open_time_ms"] >= start_ms) & (normalized["open_time_ms"] < end_ms)]
+    return out.sort_values("open_time_ms").reset_index(drop=True)
+
+
+def missing_binance_ranges(existing: pd.DataFrame, start_ms: int, end_ms: int, step_ms: int) -> list[tuple[int, int]]:
+    expected = range(start_ms, end_ms, step_ms)
+    existing_ms = set()
+    if not existing.empty:
+        existing_ms = set(existing["open_time_ms"].astype("int64").tolist())
+
+    ranges: list[tuple[int, int]] = []
+    current_start: int | None = None
+    previous_ms: int | None = None
+
+    for open_time_ms in expected:
+        if open_time_ms in existing_ms:
+            if current_start is not None and previous_ms is not None:
+                ranges.append((current_start, previous_ms + step_ms))
+                current_start = None
+                previous_ms = None
+            continue
+
+        if current_start is None:
+            current_start = open_time_ms
+        previous_ms = open_time_ms
+
+    if current_start is not None and previous_ms is not None:
+        ranges.append((current_start, previous_ms + step_ms))
+
+    return ranges
+
+
+def default_cache_path(source: str, symbol: str, interval: str, output_path: Path) -> Path:
+    if output_path.name:
+        return output_path.with_name("cache.parquet")
+    return Path("data") / "downloads" / source / symbol / interval / "cache.parquet"
+
+
+def load_seed_cache(cache_path: Path, output_path: Path) -> pd.DataFrame:
+    cache = load_existing_candles(cache_path)
+    if not cache.empty:
+        return cache
+    # Backward compatibility: old runs only wrote candles.parquet. Use it as the
+    # initial cache seed, then keep future cache data in cache.parquet.
+    return load_existing_candles(output_path)
+
+
+def fetch_binance_with_cache(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    cache_path: Path,
+    output_path: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    step_ms = interval_to_minutes(interval) * 60_000
+    cache = load_seed_cache(cache_path, output_path)
+    requested_cached = filter_by_open_time_ms(cache, start_ms, end_ms)
+    missing_ranges = missing_binance_ranges(requested_cached, start_ms, end_ms, step_ms)
+
+    downloaded_frames: list[pd.DataFrame] = []
+    downloaded_rows = 0
+    for idx, (gap_start_ms, gap_end_ms) in enumerate(missing_ranges, start=1):
+        gap_start = pd.to_datetime(gap_start_ms, unit="ms", utc=True)
+        gap_end = pd.to_datetime(gap_end_ms, unit="ms", utc=True)
+        print(f"Downloading missing Binance gap {idx}/{len(missing_ranges)}: {gap_start} to {gap_end}", file=sys.stderr)
+        rows = fetch_klines(symbol, interval, gap_start_ms, gap_end_ms)
+        if not rows:
+            continue
+        frame = build_dataframe(rows, gap_start_ms, gap_end_ms)
+        frame["symbol"] = symbol
+        frame["source"] = "binance"
+        downloaded_rows += len(frame)
+        downloaded_frames.append(frame)
+
+    full_cache = merge_candles(cache, *downloaded_frames)
+    requested = filter_by_open_time_ms(full_cache, start_ms, end_ms)
+    if requested.empty:
+        raise ValueError("No candles available for requested range after cache/download merge.")
+
+    stats = {
+        "cache_rows_before": int(len(cache)),
+        "cached_rows_in_request_before": int(len(requested_cached)),
+        "missing_ranges": int(len(missing_ranges)),
+        "downloaded_rows": int(downloaded_rows),
+        "cache_rows_after": int(len(full_cache)),
+    }
+    return requested, full_cache, stats
+
+
+def yahoo_cache_covers_request(cache: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> bool:
+    if cache.empty:
+        return False
+    times = pd.to_datetime(cache["open_time"], utc=True)
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    # Yahoo stock candles are not continuous across nights/weekends. Boundary
+    # coverage avoids treating normal market closures as missing gaps.
+    return bool(times.min() <= start_ts and times.max() >= end_ts - pd.Timedelta(days=1))
+
+
+def fetch_yahoo_with_cache(
+    symbol: str,
+    interval: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    cache_path: Path,
+    output_path: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    cache = load_seed_cache(cache_path, output_path)
+    if yahoo_cache_covers_request(cache, start_dt, end_dt):
+        fetched = pd.DataFrame()
+    else:
+        print("Yahoo cache does not cover requested boundaries; refreshing requested Yahoo range.", file=sys.stderr)
+        fetched = fetch_yahoo_ohlcv(symbol, interval, start_dt, end_dt)
+
+    full_cache = merge_candles(cache, fetched)
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    requested = full_cache[(full_cache["open_time"] >= start_ts) & (full_cache["open_time"] < end_ts)].copy()
+    requested = requested.sort_values("open_time").reset_index(drop=True)
+    if requested.empty:
+        raise ValueError("No Yahoo candles available for requested range after cache/download merge.")
+
+    stats = {
+        "cache_rows_before": int(len(cache)),
+        "cached_rows_in_request_before": int(len(cache[(cache["open_time"] >= start_ts) & (cache["open_time"] < end_ts)])) if not cache.empty else 0,
+        "missing_ranges": 0 if fetched.empty else 1,
+        "downloaded_rows": int(len(fetched)),
+        "cache_rows_after": int(len(full_cache)),
+    }
+    return requested, full_cache, stats
+
+
 def build_dataframe(rows: list[list], start_ms: int, end_ms: int) -> pd.DataFrame:
     if not rows:
         raise ValueError("No klines returned for the requested range.")
@@ -316,6 +492,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", required=True, help="UTC start (ISO8601), inclusive")
     parser.add_argument("--end", required=True, help="UTC end (ISO8601), exclusive")
     parser.add_argument("--out", default=None, help="Output Parquet file path")
+    parser.add_argument(
+        "--cache-file",
+        default=None,
+        help="Persistent candle cache path. Default: cache.parquet beside --out.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable cache reads/writes and download the requested range directly.",
+    )
+    parser.add_argument(
+        "--overwrite-cache",
+        action="store_true",
+        help="Ignore existing cache and replace it with the requested range.",
+    )
     return parser.parse_args()
 
 
@@ -335,21 +526,65 @@ def main() -> None:
         symbol = choose_random_stock(args.stock_list)
         print(f"Selected random stock symbol: {symbol}")
 
+    output_path = Path(args.out) if args.out else default_output_path(args.source, symbol, args.interval, start_dt, end_dt)
+    cache_path = None if args.no_cache else Path(args.cache_file) if args.cache_file else default_cache_path(args.source, symbol, args.interval, output_path)
+    if cache_path and cache_path.resolve() == output_path.resolve():
+        raise ValueError("--cache-file must be different from --out so requested output does not overwrite the full cache")
+
+    cache_frame = pd.DataFrame()
+    cache_stats: dict[str, int] | None = None
+
     if args.source == "binance":
         start_ms = datetime_to_ms(start_dt)
         end_ms = datetime_to_ms(end_dt)
-        rows = fetch_klines(symbol, args.interval, start_ms, end_ms)
-        frame = build_dataframe(rows, start_ms, end_ms)
-        frame["symbol"] = symbol
-        frame["source"] = "binance"
+        if cache_path and not args.overwrite_cache:
+            frame, cache_frame, cache_stats = fetch_binance_with_cache(
+                symbol=symbol,
+                interval=args.interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                cache_path=cache_path,
+                output_path=output_path,
+            )
+        else:
+            rows = fetch_klines(symbol, args.interval, start_ms, end_ms)
+            frame = build_dataframe(rows, start_ms, end_ms)
+            frame["symbol"] = symbol
+            frame["source"] = "binance"
+            cache_frame = frame.copy()
     else:
-        frame = fetch_yahoo_ohlcv(symbol, args.interval, start_dt, end_dt)
+        if cache_path and not args.overwrite_cache:
+            frame, cache_frame, cache_stats = fetch_yahoo_with_cache(
+                symbol=symbol,
+                interval=args.interval,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                cache_path=cache_path,
+                output_path=output_path,
+            )
+        else:
+            frame = fetch_yahoo_ohlcv(symbol, args.interval, start_dt, end_dt)
+            cache_frame = frame.copy()
 
-    output_path = Path(args.out) if args.out else default_output_path(args.source, symbol, args.interval, start_dt, end_dt)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(output_path, index=False)
 
+    if cache_path and not args.no_cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_frame.to_parquet(cache_path, index=False)
+
     print(f"Saved {len(frame)} candles for {symbol} from {args.source} to {output_path}")
+    if cache_path and not args.no_cache:
+        print(f"Updated candle cache: {cache_path}")
+        if cache_stats:
+            print(
+                "Cache stats: "
+                f"rows_before={cache_stats['cache_rows_before']}, "
+                f"cached_requested_before={cache_stats['cached_rows_in_request_before']}, "
+                f"missing_ranges={cache_stats['missing_ranges']}, "
+                f"downloaded_rows={cache_stats['downloaded_rows']}, "
+                f"rows_after={cache_stats['cache_rows_after']}"
+            )
     print(f"First open_time: {frame['open_time'].iloc[0]}")
     print(f"Last open_time:  {frame['open_time'].iloc[-1]}")
 

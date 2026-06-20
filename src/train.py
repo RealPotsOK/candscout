@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-out", default="models/logreg_5m.npz", help="Model output path (.npz)")
     parser.add_argument("--metrics-out", default="models/train_metrics_5m.json", help="Training metrics JSON output")
     parser.add_argument("--split", type=float, default=0.8, help="Chronological train split fraction (default: 0.8)")
+    parser.add_argument("--short-edge", type=float, default=None, help="Short label edge for target_down when feature file lacks it")
     parser.add_argument("--lr", type=float, default=0.05, help="Gradient descent learning rate")
     parser.add_argument("--epochs", type=int, default=1000, help="Gradient descent epochs")
     parser.add_argument("--l2", type=float, default=0.0, help="L2 regularization strength")
@@ -257,6 +258,18 @@ def ensure_required_columns(df: pd.DataFrame, feature_columns: list[str]) -> str
     return resolve_column(df, ["return_1bar", "return_1m"], "previous-candle direction baseline")
 
 
+def ensure_dual_targets(df: pd.DataFrame, short_edge: float | None) -> pd.DataFrame:
+    out = df.copy()
+    if "target_up" not in out.columns:
+        out["target_up"] = out["target"].astype(int)
+    if "target_down" not in out.columns:
+        forward_col = resolve_column(out, ["forward_return", "forward_return_1m"], "next-candle forward return")
+        edge_value = 0.0 if short_edge is None else float(short_edge)
+        out["target_down"] = (out[forward_col].to_numpy(dtype=np.float64) < -edge_value).astype(int)
+    out["target"] = out["target_up"].astype(int)
+    return out
+
+
 def threshold_sweep_metrics(y_true: np.ndarray, probs: np.ndarray, thresholds: list[float]) -> list[dict]:
     rows: list[dict] = []
     for threshold in thresholds:
@@ -279,6 +292,47 @@ def pick_best_threshold(rows: list[dict], metric_name: str) -> dict:
     )
 
 
+def train_and_score_logreg(
+    x_train_norm: np.ndarray,
+    y_train: np.ndarray,
+    x_test_norm: np.ndarray,
+    y_test: np.ndarray,
+    *,
+    args: argparse.Namespace,
+    thresholds: list[float],
+) -> dict:
+    pos_weight = resolve_pos_weight(y_train, args.class_weight_mode, args.pos_weight)
+    weights, bias, loss_history = train_logistic_regression(
+        x_train=x_train_norm,
+        y_train=y_train,
+        learning_rate=args.lr,
+        epochs=args.epochs,
+        l2=args.l2,
+        pos_weight=pos_weight,
+    )
+    probs = sigmoid(x_test_norm @ weights + bias)
+    preds = (probs >= args.decision_threshold).astype(int)
+    sweep_rows = threshold_sweep_metrics(y_test.astype(np.int64), probs, thresholds)
+    return {
+        "weights": weights,
+        "bias": float(bias),
+        "loss_history": loss_history,
+        "pos_weight": float(pos_weight),
+        "probs": probs,
+        "preds": preds,
+        "metrics": classification_metrics(y_test.astype(np.int64), preds),
+        "class_balance": {
+            "train": class_balance(y_train.astype(np.int64)),
+            "test": class_balance(y_test.astype(np.int64)),
+        },
+        "threshold_sweep": {
+            "optimize_metric": args.optimize_metric,
+            "rows": sweep_rows,
+            "best": pick_best_threshold(sweep_rows, args.optimize_metric),
+        },
+    }
+
+
 def main() -> None:
     args = parse_args()
 
@@ -299,6 +353,7 @@ def main() -> None:
         feature_cols_arg=args.feature_columns,
     )
 
+    df = ensure_dual_targets(df, args.short_edge)
     one_bar_return_col = ensure_required_columns(df, feature_columns)
     df = df.sort_values("open_time").reset_index(drop=True)
 
@@ -313,9 +368,11 @@ def main() -> None:
     test_df = df.iloc[split_idx:].copy()
 
     x_train = train_df[feature_columns].to_numpy(dtype=np.float64)
-    y_train = train_df["target"].to_numpy(dtype=np.float64)
+    y_train = train_df["target_up"].to_numpy(dtype=np.float64)
+    y_train_down = train_df["target_down"].to_numpy(dtype=np.float64)
     x_test = test_df[feature_columns].to_numpy(dtype=np.float64)
-    y_test = test_df["target"].to_numpy(dtype=np.int64)
+    y_test = test_df["target_up"].to_numpy(dtype=np.int64)
+    y_test_down = test_df["target_down"].to_numpy(dtype=np.int64)
 
     mean = x_train.mean(axis=0)
     std = x_train.std(axis=0)
@@ -324,19 +381,27 @@ def main() -> None:
     x_train_norm = (x_train - mean) / std
     x_test_norm = (x_test - mean) / std
 
-    pos_weight = resolve_pos_weight(y_train, args.class_weight_mode, args.pos_weight)
-
-    weights, bias, loss_history = train_logistic_regression(
-        x_train=x_train_norm,
-        y_train=y_train,
-        learning_rate=args.lr,
-        epochs=args.epochs,
-        l2=args.l2,
-        pos_weight=pos_weight,
+    up_model = train_and_score_logreg(
+        x_train_norm,
+        y_train,
+        x_test_norm,
+        y_test,
+        args=args,
+        thresholds=thresholds,
     )
-
-    model_probs = sigmoid(x_test_norm @ weights + bias)
-    model_preds = (model_probs >= args.decision_threshold).astype(int)
+    down_model = train_and_score_logreg(
+        x_train_norm,
+        y_train_down,
+        x_test_norm,
+        y_test_down,
+        args=args,
+        thresholds=thresholds,
+    )
+    weights = up_model["weights"]
+    bias = up_model["bias"]
+    loss_history = up_model["loss_history"]
+    model_probs = up_model["probs"]
+    model_preds = up_model["preds"]
 
     baseline_preds = {
         "always_positive": np.ones_like(y_test, dtype=int),
@@ -350,8 +415,8 @@ def main() -> None:
     for name, preds in baseline_preds.items():
         comparison[name] = classification_metrics(y_test, preds)
 
-    sweep_rows = threshold_sweep_metrics(y_test, model_probs, thresholds)
-    best_row = pick_best_threshold(sweep_rows, args.optimize_metric)
+    sweep_rows = up_model["threshold_sweep"]["rows"]
+    best_row = up_model["threshold_sweep"]["best"]
 
     metrics = {
         "primary_objective": "predictive_validity_vs_baselines",
@@ -368,9 +433,31 @@ def main() -> None:
             "one_bar_return": one_bar_return_col,
         },
         "class_balance": {
-            "overall": class_balance(df["target"].to_numpy(dtype=np.int64)),
-            "train": class_balance(train_df["target"].to_numpy(dtype=np.int64)),
+            "overall": class_balance(df["target_up"].to_numpy(dtype=np.int64)),
+            "train": class_balance(train_df["target_up"].to_numpy(dtype=np.int64)),
             "test": class_balance(y_test),
+        },
+        "dual_targets": {
+            "target_up": {
+                "definition": "target_up=1 when next-candle forward_return > edge",
+                "class_balance": {
+                    "overall": class_balance(df["target_up"].to_numpy(dtype=np.int64)),
+                    "train": class_balance(train_df["target_up"].to_numpy(dtype=np.int64)),
+                    "test": class_balance(y_test),
+                },
+                "metrics": up_model["metrics"],
+                "threshold_sweep": up_model["threshold_sweep"],
+            },
+            "target_down": {
+                "definition": "target_down=1 when next-candle forward_return < -short_edge",
+                "class_balance": {
+                    "overall": class_balance(df["target_down"].to_numpy(dtype=np.int64)),
+                    "train": class_balance(train_df["target_down"].to_numpy(dtype=np.int64)),
+                    "test": class_balance(y_test_down),
+                },
+                "metrics": down_model["metrics"],
+                "threshold_sweep": down_model["threshold_sweep"],
+            },
         },
         "model_training": {
             "learning_rate": float(args.lr),
@@ -378,7 +465,8 @@ def main() -> None:
             "l2": float(args.l2),
             "decision_threshold": float(args.decision_threshold),
             "class_weight_mode": args.class_weight_mode,
-            "pos_weight_used": float(pos_weight),
+            "pos_weight_used": float(up_model["pos_weight"]),
+            "down_pos_weight_used": float(down_model["pos_weight"]),
             "initial_loss": float(loss_history[0]),
             "final_loss": float(loss_history[-1]),
         },
@@ -396,9 +484,12 @@ def main() -> None:
         model_out,
         weights=weights,
         bias=np.array([bias], dtype=np.float64),
+        weights_down=down_model["weights"],
+        bias_down=np.array([down_model["bias"]], dtype=np.float64),
         feature_names=np.array(feature_columns),
         mean=mean,
         std=std,
+        short_edge=np.array([0.0 if args.short_edge is None else args.short_edge], dtype=np.float64),
     )
 
     metrics_out = Path(args.metrics_out)

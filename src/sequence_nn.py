@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""From-scratch NumPy sequence models: flattened MLP and 1D CNN."""
+"""Sequence model math and portable artifacts for MLP, CNN, GRU, LSTM, and Transformer."""
 
 from __future__ import annotations
 
@@ -510,15 +510,21 @@ def save_sequence_model(
     channel_names: list[str],
     hidden_layers: list[int],
     edge: float,
+    short_edge: float | None = None,
+    training_backend: str = "numpy",
+    training_device: str = "cpu",
 ) -> None:
     payload = {
         "model_type": np.array(["sequence_mlp"]),
+        "training_backend": np.array([training_backend]),
+        "training_device": np.array([training_device]),
         "lookback": np.array([lookback], dtype=np.int64),
         "channel_names": np.array(channel_names),
         "hidden_layers": np.array(hidden_layers, dtype=np.int64),
         "input_mean": input_mean.astype(np.float32),
         "input_std": input_std.astype(np.float32),
         "edge": np.array([edge], dtype=np.float64),
+        "short_edge": np.array([edge if short_edge is None else short_edge], dtype=np.float64),
         "layer_count": np.array([len(weights)], dtype=np.int64),
     }
     for idx, (weight, bias) in enumerate(zip(weights, biases)):
@@ -542,9 +548,14 @@ def save_cnn_sequence_model(
     cnn_kernel_sizes: list[int],
     hidden_layers: list[int],
     edge: float,
+    short_edge: float | None = None,
+    training_backend: str = "numpy",
+    training_device: str = "cpu",
 ) -> None:
     payload = {
         "model_type": np.array(["sequence_cnn"]),
+        "training_backend": np.array([training_backend]),
+        "training_device": np.array([training_device]),
         "lookback": np.array([lookback], dtype=np.int64),
         "channel_names": np.array(channel_names),
         "cnn_filters": np.array(cnn_filters, dtype=np.int64),
@@ -553,6 +564,7 @@ def save_cnn_sequence_model(
         "input_mean": input_mean.astype(np.float32),
         "input_std": input_std.astype(np.float32),
         "edge": np.array([edge], dtype=np.float64),
+        "short_edge": np.array([edge if short_edge is None else short_edge], dtype=np.float64),
         "conv_layer_count": np.array([len(conv_weights)], dtype=np.int64),
         "dense_layer_count": np.array([len(dense_weights)], dtype=np.int64),
     }
@@ -565,17 +577,147 @@ def save_cnn_sequence_model(
     np.savez(path, **payload)
 
 
+def save_lstm_sequence_model(
+    path,
+    *,
+    state: dict[str, np.ndarray],
+    input_mean: np.ndarray,
+    input_std: np.ndarray,
+    lookback: int,
+    channel_names: list[str],
+    sequence_feature_set: str,
+    lstm_hidden_size: int,
+    lstm_layers: int,
+    lstm_dropout: float,
+    hidden_layers: list[int],
+    edge: float,
+    short_edge: float | None = None,
+    training_backend: str = "torch",
+    training_device: str = "cpu",
+) -> None:
+    payload = {
+        "model_type": np.array(["sequence_lstm"]),
+        "training_backend": np.array([training_backend]),
+        "training_device": np.array([training_device]),
+        "lookback": np.array([lookback], dtype=np.int64),
+        "channel_names": np.array(channel_names),
+        "sequence_feature_set": np.array([sequence_feature_set]),
+        "lstm_hidden_size": np.array([lstm_hidden_size], dtype=np.int64),
+        "lstm_layers": np.array([lstm_layers], dtype=np.int64),
+        "lstm_dropout": np.array([lstm_dropout], dtype=np.float64),
+        "hidden_layers": np.array(hidden_layers, dtype=np.int64),
+        "input_mean": input_mean.astype(np.float32),
+        "input_std": input_std.astype(np.float32),
+        "edge": np.array([edge], dtype=np.float64),
+        "short_edge": np.array([edge if short_edge is None else short_edge], dtype=np.float64),
+        "state_key_count": np.array([len(state)], dtype=np.int64),
+    }
+    for idx, (key, value) in enumerate(state.items()):
+        payload[f"state_key_{idx}"] = np.array([key])
+        payload[f"state_value_{idx}"] = value.astype(np.float32)
+    np.savez(path, **payload)
+
+
+def save_gru_sequence_model(
+    path,
+    *,
+    state: dict[str, np.ndarray],
+    input_mean: np.ndarray,
+    input_std: np.ndarray,
+    lookback: int,
+    channel_names: list[str],
+    sequence_feature_set: str,
+    gru_hidden_size: int,
+    gru_layers: int,
+    gru_dropout: float,
+    hidden_layers: list[int],
+    edge: float,
+    short_edge: float | None = None,
+    training_backend: str = "torch",
+    training_device: str = "cpu",
+) -> None:
+    payload = {
+        "model_type": np.array(["sequence_gru"]),
+        "training_backend": np.array([training_backend]),
+        "training_device": np.array([training_device]),
+        "lookback": np.array([lookback], dtype=np.int64),
+        "channel_names": np.array(channel_names),
+        "sequence_feature_set": np.array([sequence_feature_set]),
+        "gru_hidden_size": np.array([gru_hidden_size], dtype=np.int64),
+        "gru_layers": np.array([gru_layers], dtype=np.int64),
+        "gru_dropout": np.array([gru_dropout], dtype=np.float64),
+        "hidden_layers": np.array(hidden_layers, dtype=np.int64),
+        "input_mean": input_mean.astype(np.float32),
+        "input_std": input_std.astype(np.float32),
+        "edge": np.array([edge], dtype=np.float64),
+        "short_edge": np.array([edge if short_edge is None else short_edge], dtype=np.float64),
+        "state_key_count": np.array([len(state)], dtype=np.int64),
+    }
+    for idx, (key, value) in enumerate(state.items()):
+        payload[f"state_key_{idx}"] = np.array([key])
+        payload[f"state_value_{idx}"] = value.astype(np.float32)
+    np.savez(path, **payload)
+
+
+def save_transformer_sequence_model(
+    path,
+    *,
+    state: dict[str, np.ndarray],
+    input_mean: np.ndarray,
+    input_std: np.ndarray,
+    lookback: int,
+    channel_names: list[str],
+    sequence_feature_set: str,
+    transformer_d_model: int,
+    transformer_heads: int,
+    transformer_layers: int,
+    transformer_ff_dim: int,
+    transformer_dropout: float,
+    hidden_layers: list[int],
+    edge: float,
+    short_edge: float | None = None,
+    training_backend: str = "torch",
+    training_device: str = "cpu",
+) -> None:
+    payload = {
+        "model_type": np.array(["sequence_transformer"]),
+        "training_backend": np.array([training_backend]),
+        "training_device": np.array([training_device]),
+        "lookback": np.array([lookback], dtype=np.int64),
+        "channel_names": np.array(channel_names),
+        "sequence_feature_set": np.array([sequence_feature_set]),
+        "transformer_d_model": np.array([transformer_d_model], dtype=np.int64),
+        "transformer_heads": np.array([transformer_heads], dtype=np.int64),
+        "transformer_layers": np.array([transformer_layers], dtype=np.int64),
+        "transformer_ff_dim": np.array([transformer_ff_dim], dtype=np.int64),
+        "transformer_dropout": np.array([transformer_dropout], dtype=np.float64),
+        "hidden_layers": np.array(hidden_layers, dtype=np.int64),
+        "input_mean": input_mean.astype(np.float32),
+        "input_std": input_std.astype(np.float32),
+        "edge": np.array([edge], dtype=np.float64),
+        "short_edge": np.array([edge if short_edge is None else short_edge], dtype=np.float64),
+        "state_key_count": np.array([len(state)], dtype=np.int64),
+    }
+    for idx, (key, value) in enumerate(state.items()):
+        payload[f"state_key_{idx}"] = np.array([key])
+        payload[f"state_value_{idx}"] = value.astype(np.float32)
+    np.savez(path, **payload)
+
+
 def load_sequence_model(path) -> dict:
     model = np.load(path)
     model_type = str(model["model_type"][0]) if "model_type" in model.files else "sequence_mlp"
     base = {
         "model_type": model_type,
+        "training_backend": str(model["training_backend"][0]) if "training_backend" in model.files else "unknown",
+        "training_device": str(model["training_device"][0]) if "training_device" in model.files else "unknown",
         "lookback": int(model["lookback"][0]),
         "channel_names": [str(x) for x in model["channel_names"]],
         "hidden_layers": [int(x) for x in model["hidden_layers"]],
         "input_mean": model["input_mean"].astype(np.float32),
         "input_std": model["input_std"].astype(np.float32),
         "edge": float(model["edge"][0]),
+        "short_edge": float(model["short_edge"][0]) if "short_edge" in model.files else float(model["edge"][0]),
     }
 
     if model_type == "sequence_mlp":
@@ -603,6 +745,62 @@ def load_sequence_model(path) -> dict:
         )
         return base
 
+    if model_type == "sequence_lstm":
+        state_key_count = int(model["state_key_count"][0])
+        base.update(
+            {
+                "sequence_feature_set": str(model["sequence_feature_set"][0])
+                if "sequence_feature_set" in model.files
+                else "technical",
+                "lstm_hidden_size": int(model["lstm_hidden_size"][0]),
+                "lstm_layers": int(model["lstm_layers"][0]),
+                "lstm_dropout": float(model["lstm_dropout"][0]) if "lstm_dropout" in model.files else 0.0,
+                "state": {
+                    str(model[f"state_key_{idx}"][0]): model[f"state_value_{idx}"].astype(np.float32)
+                    for idx in range(state_key_count)
+                },
+            }
+        )
+        return base
+
+    if model_type == "sequence_gru":
+        state_key_count = int(model["state_key_count"][0])
+        base.update(
+            {
+                "sequence_feature_set": str(model["sequence_feature_set"][0])
+                if "sequence_feature_set" in model.files
+                else "technical",
+                "gru_hidden_size": int(model["gru_hidden_size"][0]),
+                "gru_layers": int(model["gru_layers"][0]),
+                "gru_dropout": float(model["gru_dropout"][0]) if "gru_dropout" in model.files else 0.0,
+                "state": {
+                    str(model[f"state_key_{idx}"][0]): model[f"state_value_{idx}"].astype(np.float32)
+                    for idx in range(state_key_count)
+                },
+            }
+        )
+        return base
+
+    if model_type == "sequence_transformer":
+        state_key_count = int(model["state_key_count"][0])
+        base.update(
+            {
+                "sequence_feature_set": str(model["sequence_feature_set"][0])
+                if "sequence_feature_set" in model.files
+                else "technical",
+                "transformer_d_model": int(model["transformer_d_model"][0]),
+                "transformer_heads": int(model["transformer_heads"][0]),
+                "transformer_layers": int(model["transformer_layers"][0]),
+                "transformer_ff_dim": int(model["transformer_ff_dim"][0]),
+                "transformer_dropout": float(model["transformer_dropout"][0]),
+                "state": {
+                    str(model[f"state_key_{idx}"][0]): model[f"state_value_{idx}"].astype(np.float32)
+                    for idx in range(state_key_count)
+                },
+            }
+        )
+        return base
+
     raise ValueError(f"Unsupported sequence model type: {model_type}")
 
 
@@ -622,6 +820,69 @@ def predict_loaded_sequence_model(model: dict, x_seq: np.ndarray, batch_size: in
             model["conv_biases"],
             model["dense_weights"],
             model["dense_biases"],
+            batch_size=batch_size,
+        )
+
+    if model["model_type"] == "sequence_lstm":
+        mean = model["input_mean"].reshape(1, 1, -1)
+        std = model["input_std"].reshape(1, 1, -1)
+        x_norm = ((x_seq - mean) / std).astype(np.float32, copy=False)
+        try:
+            from torch_sequence_nn import predict_lstm_proba_from_state
+        except ImportError as exc:
+            raise RuntimeError("sequence_lstm prediction requires PyTorch installed in this virtualenv.") from exc
+        return predict_lstm_proba_from_state(
+            x_norm,
+            state=model["state"],
+            input_channels=len(model["channel_names"]),
+            lstm_hidden_size=model["lstm_hidden_size"],
+            lstm_layers=model["lstm_layers"],
+            hidden_layers=model["hidden_layers"],
+            dropout=model.get("lstm_dropout", 0.0),
+            device_name="cuda",
+            batch_size=batch_size,
+        )
+
+    if model["model_type"] == "sequence_gru":
+        mean = model["input_mean"].reshape(1, 1, -1)
+        std = model["input_std"].reshape(1, 1, -1)
+        x_norm = ((x_seq - mean) / std).astype(np.float32, copy=False)
+        try:
+            from torch_sequence_nn import predict_gru_proba_from_state
+        except ImportError as exc:
+            raise RuntimeError("sequence_gru prediction requires PyTorch installed in this virtualenv.") from exc
+        return predict_gru_proba_from_state(
+            x_norm,
+            state=model["state"],
+            input_channels=len(model["channel_names"]),
+            gru_hidden_size=model["gru_hidden_size"],
+            gru_layers=model["gru_layers"],
+            hidden_layers=model["hidden_layers"],
+            dropout=model.get("gru_dropout", 0.0),
+            device_name="cuda",
+            batch_size=batch_size,
+        )
+
+    if model["model_type"] == "sequence_transformer":
+        mean = model["input_mean"].reshape(1, 1, -1)
+        std = model["input_std"].reshape(1, 1, -1)
+        x_norm = ((x_seq - mean) / std).astype(np.float32, copy=False)
+        try:
+            from torch_sequence_nn import predict_transformer_proba_from_state
+        except ImportError as exc:
+            raise RuntimeError("sequence_transformer prediction requires PyTorch installed in this virtualenv.") from exc
+        return predict_transformer_proba_from_state(
+            x_norm,
+            state=model["state"],
+            input_channels=len(model["channel_names"]),
+            lookback=model["lookback"],
+            d_model=model["transformer_d_model"],
+            heads=model["transformer_heads"],
+            layers=model["transformer_layers"],
+            ff_dim=model["transformer_ff_dim"],
+            hidden_layers=model["hidden_layers"],
+            dropout=model["transformer_dropout"],
+            device_name="cuda",
             batch_size=batch_size,
         )
 

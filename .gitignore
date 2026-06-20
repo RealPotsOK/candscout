@@ -7,8 +7,14 @@ __pycache__/
 
 .env
 .env.*
+!live_sim/.env.example
 env/local.env
 *.log
+
+live_sim/.env
+live_sim/env/
+live_sim/state/*
+!live_sim/state/.gitkeep
 
 data/
 models/
