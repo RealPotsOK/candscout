@@ -171,6 +171,23 @@ class Store:
                     error TEXT,
                     raw_response TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS real_account_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    price REAL NOT NULL DEFAULT 0,
+                    usd_balance REAL NOT NULL DEFAULT 0,
+                    sol_balance REAL NOT NULL DEFAULT 0,
+                    bot_sol_qty REAL NOT NULL DEFAULT 0,
+                    bot_cost_usd REAL NOT NULL DEFAULT 0,
+                    bot_market_value_usd REAL NOT NULL DEFAULT 0,
+                    bot_unrealized_pnl_usd REAL NOT NULL DEFAULT 0,
+                    bot_realized_pnl_usd REAL NOT NULL DEFAULT 0,
+                    bot_total_fees_usd REAL NOT NULL DEFAULT 0,
+                    estimated_account_value_usd REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'coinbase'
+                );
                 """
             )
             self._ensure_column("open_position", "side", "TEXT NOT NULL DEFAULT 'long'")
@@ -216,6 +233,7 @@ class Store:
                 "training_runs",
                 "real_trade_state",
                 "real_orders",
+                "real_account_snapshots",
             ]:
                 self.conn.execute(f"DELETE FROM {table}")
             self.conn.execute(
@@ -488,6 +506,39 @@ class Store:
 
     def recent_real_orders(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.recent_rows("real_orders", limit)
+
+    def insert_real_account_snapshot(self, snapshot: dict[str, Any]) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO real_account_snapshots (
+                    ts, product_id, price, usd_balance, sol_balance, bot_sol_qty,
+                    bot_cost_usd, bot_market_value_usd, bot_unrealized_pnl_usd,
+                    bot_realized_pnl_usd, bot_total_fees_usd, estimated_account_value_usd, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot["ts"],
+                    snapshot["product_id"],
+                    snapshot.get("price", 0.0),
+                    snapshot.get("usd_balance", 0.0),
+                    snapshot.get("sol_balance", 0.0),
+                    snapshot.get("bot_sol_qty", 0.0),
+                    snapshot.get("bot_cost_usd", 0.0),
+                    snapshot.get("bot_market_value_usd", 0.0),
+                    snapshot.get("bot_unrealized_pnl_usd", 0.0),
+                    snapshot.get("bot_realized_pnl_usd", 0.0),
+                    snapshot.get("bot_total_fees_usd", 0.0),
+                    snapshot.get("estimated_account_value_usd", 0.0),
+                    snapshot.get("source", "coinbase"),
+                ),
+            )
+
+    def recent_real_account_snapshots(self, limit: int = 1000) -> list[dict[str, Any]]:
+        return self.recent_rows("real_account_snapshots", limit)
+
+    def latest_real_account_snapshot(self) -> dict[str, Any] | None:
+        return self.latest_row("real_account_snapshots")
 
     def insert_training_run(
         self,

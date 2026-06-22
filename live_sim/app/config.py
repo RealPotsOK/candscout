@@ -85,9 +85,13 @@ class Config:
     execution_mode: str
     real_trading_enabled: bool
     real_require_manual_arm: bool
+    real_quick_arm_enabled: bool
     real_max_total_usd: float
     real_max_order_usd: float
     real_min_order_usd: float
+    real_portfolio_mode: str
+    real_cash_asset: str
+    real_base_asset: str
     coinbase_product_id: str
     coinbase_api_key: str
     coinbase_api_secret: str
@@ -237,9 +241,13 @@ def load_config() -> Config:
         execution_mode=env_str("EXECUTION_MODE", "paper").lower(),
         real_trading_enabled=env_bool("REAL_TRADING_ENABLED", False),
         real_require_manual_arm=env_bool("REAL_REQUIRE_MANUAL_ARM", True),
+        real_quick_arm_enabled=env_bool("REAL_QUICK_ARM_ENABLED", False),
         real_max_total_usd=env_float("REAL_MAX_TOTAL_USD", 20.0),
         real_max_order_usd=env_float("REAL_MAX_ORDER_USD", 5.0),
         real_min_order_usd=env_float("REAL_MIN_ORDER_USD", 1.0),
+        real_portfolio_mode=env_str("REAL_PORTFOLIO_MODE", "account_balances"),
+        real_cash_asset=env_str("REAL_CASH_ASSET", "USD").upper(),
+        real_base_asset=env_str("REAL_BASE_ASSET", "SOL").upper(),
         coinbase_product_id=env_str("COINBASE_PRODUCT_ID", "SOL-USD").upper(),
         coinbase_api_key=env_str("COINBASE_API_KEY", ""),
         coinbase_api_secret=env_str("COINBASE_API_SECRET", ""),
@@ -348,18 +356,23 @@ def validate_config(cfg: Config) -> None:
         raise ValueError("TRAIN_CLASS_WEIGHT_MODE must be none, balanced, or manual")
     if cfg.execution_mode not in {"paper", "coinbase_live"}:
         raise ValueError("EXECUTION_MODE must be paper or coinbase_live")
+    if cfg.real_portfolio_mode not in {"account_balances", "capped_bot_tracked"}:
+        raise ValueError("REAL_PORTFOLIO_MODE must be account_balances or capped_bot_tracked")
+    if not cfg.real_cash_asset or not cfg.real_base_asset:
+        raise ValueError("REAL_CASH_ASSET and REAL_BASE_ASSET are required")
     if cfg.real_max_total_usd <= 0:
         raise ValueError("REAL_MAX_TOTAL_USD must be positive")
-    if cfg.real_max_total_usd > 20:
-        raise ValueError("REAL_MAX_TOTAL_USD must be <= 20 for v1 real trading")
     if cfg.real_max_order_usd <= 0:
         raise ValueError("REAL_MAX_ORDER_USD must be positive")
-    if cfg.real_max_order_usd > cfg.real_max_total_usd:
-        raise ValueError("REAL_MAX_ORDER_USD cannot exceed REAL_MAX_TOTAL_USD")
     if cfg.real_min_order_usd <= 0:
         raise ValueError("REAL_MIN_ORDER_USD must be positive")
-    if cfg.real_min_order_usd > cfg.real_max_order_usd:
-        raise ValueError("REAL_MIN_ORDER_USD cannot exceed REAL_MAX_ORDER_USD")
+    if cfg.real_portfolio_mode == "capped_bot_tracked":
+        if cfg.real_max_total_usd > 20:
+            raise ValueError("REAL_MAX_TOTAL_USD must be <= 20 for capped bot-tracked real trading")
+        if cfg.real_max_order_usd > cfg.real_max_total_usd:
+            raise ValueError("REAL_MAX_ORDER_USD cannot exceed REAL_MAX_TOTAL_USD")
+        if cfg.real_min_order_usd > cfg.real_max_order_usd:
+            raise ValueError("REAL_MIN_ORDER_USD cannot exceed REAL_MAX_ORDER_USD")
     if cfg.coinbase_timeout <= 0:
         raise ValueError("COINBASE_TIMEOUT must be positive")
     if cfg.real_order_status_polls < 0:
@@ -371,8 +384,14 @@ def validate_config(cfg: Config) -> None:
             raise ValueError("REAL_TRADING_ENABLED=true requires EXECUTION_MODE=coinbase_live")
         if cfg.symbol != "SOLUSDT":
             raise ValueError("Coinbase real trading v1 only supports SYMBOL=SOLUSDT")
-        if cfg.coinbase_product_id != "SOL-USD":
-            raise ValueError("Coinbase real trading v1 only supports COINBASE_PRODUCT_ID=SOL-USD")
+        product_parts = cfg.coinbase_product_id.split("-")
+        if len(product_parts) != 2:
+            raise ValueError("COINBASE_PRODUCT_ID must look like BASE-QUOTE, e.g. SOL-USD")
+        if cfg.real_portfolio_mode == "account_balances":
+            if cfg.real_base_asset != "SOL" or cfg.real_cash_asset != "USD" or cfg.coinbase_product_id != "SOL-USD":
+                raise ValueError("Account-balance real trading v1 requires REAL_BASE_ASSET=SOL, REAL_CASH_ASSET=USD, COINBASE_PRODUCT_ID=SOL-USD")
+        elif product_parts[0] != cfg.real_base_asset or product_parts[1] != cfg.real_cash_asset:
+            raise ValueError("COINBASE_PRODUCT_ID must match REAL_BASE_ASSET-REAL_CASH_ASSET")
         if cfg.trade_mode != "long_only":
             raise ValueError("Real trading v1 requires TRADE_MODE=long_only")
         if cfg.borrow_fee != 0.0:
@@ -383,6 +402,8 @@ def validate_config(cfg: Config) -> None:
             raise ValueError("Real trading v1 requires LIQUIDATION_SIMULATION=off")
         if not cfg.real_require_manual_arm:
             raise ValueError("Real trading v1 requires REAL_REQUIRE_MANUAL_ARM=true")
+        if cfg.real_quick_arm_enabled and not cfg.real_arm_token:
+            raise ValueError("REAL_QUICK_ARM_ENABLED=true requires REAL_ARM_TOKEN")
         if not cfg.coinbase_api_key or not cfg.coinbase_api_secret:
             raise ValueError("Coinbase real trading requires COINBASE_API_KEY and COINBASE_API_SECRET")
         if cfg.real_trading_enabled and not cfg.real_arm_token:

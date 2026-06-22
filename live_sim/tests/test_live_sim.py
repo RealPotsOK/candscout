@@ -190,9 +190,13 @@ class RealTradingSafetyTest(unittest.TestCase):
             "EXECUTION_MODE": "coinbase_live",
             "REAL_TRADING_ENABLED": "true",
             "REAL_REQUIRE_MANUAL_ARM": "true",
+            "REAL_QUICK_ARM_ENABLED": "false",
             "REAL_MAX_TOTAL_USD": "20",
             "REAL_MAX_ORDER_USD": "5",
             "REAL_MIN_ORDER_USD": "1",
+            "REAL_PORTFOLIO_MODE": "account_balances",
+            "REAL_CASH_ASSET": "USD",
+            "REAL_BASE_ASSET": "SOL",
             "COINBASE_PRODUCT_ID": "SOL-USD",
             "COINBASE_API_KEY": "organizations/test/apiKeys/test",
             "COINBASE_API_SECRET": "test-secret",
@@ -207,7 +211,7 @@ class RealTradingSafetyTest(unittest.TestCase):
         return env
 
     def test_config_rejects_live_cap_above_20(self) -> None:
-        with patch.dict(os.environ, self.live_env(REAL_MAX_TOTAL_USD="21"), clear=True):
+        with patch.dict(os.environ, self.live_env(REAL_PORTFOLIO_MODE="capped_bot_tracked", REAL_MAX_TOTAL_USD="21"), clear=True):
             with self.assertRaises(ValueError):
                 load_config()
 
@@ -221,10 +225,53 @@ class RealTradingSafetyTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config()
 
-    def test_real_buy_never_exceeds_order_or_total_cap(self) -> None:
+    def test_config_accepts_sol_cad_for_capped_bot_tracked_mode(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.live_env(
+                REAL_PORTFOLIO_MODE="capped_bot_tracked",
+                REAL_CASH_ASSET="CAD",
+                COINBASE_PRODUCT_ID="SOL-CAD",
+            ),
+            clear=True,
+        ):
+            cfg = load_config()
+            self.assertEqual(cfg.coinbase_product_id, "SOL-CAD")
+
+    def test_account_balance_mode_requires_sol_usd(self) -> None:
+        with patch.dict(os.environ, self.live_env(COINBASE_PRODUCT_ID="SOL-CAD"), clear=True):
+            with self.assertRaises(ValueError):
+                load_config()
+
+    def test_quick_arm_toggle_arms_and_disarms_when_enabled(self) -> None:
+        class FakeExecutor:
+            def health_check(self) -> dict[str, object]:
+                return {"ok": True, "product_id": "SOL-USD"}
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USD", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USD": 10.0, "SOL": 0.0}
+
+        with patch.dict(os.environ, self.live_env(REAL_QUICK_ARM_ENABLED="true"), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            service = RealTradeService(cfg, store, FakeExecutor())  # type: ignore[arg-type]
+            service.toggle_arm(ts="2026-01-01T00:00:00Z")
+            self.assertTrue(bool(store.real_state()["armed"]))
+            service.toggle_arm(ts="2026-01-01T00:01:00Z")
+            self.assertFalse(bool(store.real_state()["armed"]))
+            store.close()
+
+    def test_account_balance_buy_uses_available_usd(self) -> None:
         class FakeExecutor:
             def __init__(self) -> None:
                 self.buy_quotes: list[float] = []
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USD", "price": 100.0}
 
             def available_balances(self) -> dict[str, float]:
                 return {"USD": 100.0, "SOL": 0.0}
@@ -259,11 +306,159 @@ class RealTradingSafetyTest(unittest.TestCase):
                 planned_usd=1000.0,
                 reason="test",
             )
+            self.assertEqual(fake.buy_quotes, [100.0])
+            store.close()
+
+    def test_capped_real_buy_never_exceeds_order_or_total_cap(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.buy_quotes: list[float] = []
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USD", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USD": 100.0, "SOL": 0.0}
+
+            def market_buy_quote(self, quote_usd: float) -> RealOrderResult:
+                self.buy_quotes.append(quote_usd)
+                return RealOrderResult(
+                    status="filled",
+                    product_id="SOL-USD",
+                    side="BUY",
+                    client_order_id="test-buy",
+                    coinbase_order_id="order-buy",
+                    requested_usd=quote_usd,
+                    requested_sol=0.0,
+                    filled_usd=quote_usd,
+                    filled_sol=quote_usd / 100.0,
+                    average_price=100.0,
+                    fee_usd=0.0,
+                    raw_response={"order": {"status": "FILLED"}},
+                )
+
+        with patch.dict(os.environ, self.live_env(REAL_PORTFOLIO_MODE="capped_bot_tracked"), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            fake = FakeExecutor()
+            service = RealTradeService(cfg, store, fake)  # type: ignore[arg-type]
+            service.execute_buy(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                planned_usd=1000.0,
+                reason="test",
+            )
             self.assertEqual(fake.buy_quotes, [5.0])
             self.assertAlmostEqual(store.real_state()["bot_cost_usd"], 5.0)
             store.close()
 
-    def test_real_sell_uses_only_bot_tracked_sol(self) -> None:
+    def test_account_balance_buy_records_no_usd_cash_available(self) -> None:
+        class FakeExecutor:
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USD", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USD": 0.0, "SOL": 0.0}
+
+        with patch.dict(
+            os.environ,
+            self.live_env(),
+            clear=True,
+        ), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            service = RealTradeService(cfg, store, FakeExecutor())  # type: ignore[arg-type]
+            service.execute_buy(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                planned_usd=1.0,
+                reason="test",
+            )
+            order = store.latest_real_order()
+            assert order is not None
+            self.assertEqual(order["status"], "skipped")
+            self.assertEqual(order["reason"], "no_usd_cash_available")
+            self.assertAlmostEqual(order["requested_usd"], 0.0)
+            store.close()
+
+    def test_real_buy_disarms_before_unsupported_product_order(self) -> None:
+        class FakeExecutor:
+            buy_calls = 0
+
+            def product_snapshot(self) -> dict[str, object]:
+                raise RuntimeError("Product SOL-USD not supported")
+
+            def market_buy_quote(self, quote_usd: float) -> RealOrderResult:
+                self.buy_calls += 1
+                raise AssertionError("market buy should not be called")
+
+        with patch.dict(os.environ, self.live_env(), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            fake = FakeExecutor()
+            service = RealTradeService(cfg, store, fake)  # type: ignore[arg-type]
+            service.execute_buy(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                planned_usd=5.0,
+                reason="test",
+            )
+            self.assertEqual(fake.buy_calls, 0)
+            self.assertFalse(bool(store.real_state()["armed"]))
+            self.assertEqual(store.latest_real_order()["status"], "failed")
+            store.close()
+
+    def test_account_balance_sell_uses_available_sol(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.sell_calls: list[float] = []
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USD", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USD": 0.0, "SOL": 1.25}
+
+            def market_sell_base(self, base_sol: float) -> RealOrderResult:
+                self.sell_calls.append(base_sol)
+                return RealOrderResult(
+                    status="filled",
+                    product_id="SOL-USD",
+                    side="SELL",
+                    client_order_id="test-sell",
+                    coinbase_order_id="order-sell",
+                    requested_usd=0.0,
+                    requested_sol=base_sol,
+                    filled_usd=10.0,
+                    filled_sol=base_sol,
+                    average_price=100.0,
+                    fee_usd=0.0,
+                    raw_response={"order": {"status": "FILLED"}},
+                )
+
+        with patch.dict(os.environ, self.live_env(), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            fake = FakeExecutor()
+            service = RealTradeService(cfg, store, fake)  # type: ignore[arg-type]
+            service.execute_sell_all(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                reason="test",
+            )
+            self.assertEqual(fake.sell_calls, [1.25])
+            self.assertEqual(store.latest_real_order()["action"], "sell_all_sol")
+            store.close()
+
+    def test_capped_real_sell_uses_only_bot_tracked_sol(self) -> None:
         class FakeExecutor:
             sell_calls = 0
 
@@ -284,7 +479,7 @@ class RealTradingSafetyTest(unittest.TestCase):
                     raw_response={"order": {"status": "FILLED"}},
                 )
 
-        with patch.dict(os.environ, self.live_env(), clear=True), TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, self.live_env(REAL_PORTFOLIO_MODE="capped_bot_tracked"), clear=True), TemporaryDirectory() as tmp:
             cfg = load_config()
             store = Store(str(Path(tmp) / "live.db"))
             store.initialize_account(100.0, "2026-01-01T00:00:00Z")

@@ -81,6 +81,17 @@ def _client_order_id(prefix: str, product_id: str) -> str:
     return f"cryptopred-{prefix}-{product}-{uuid.uuid4().hex[:18]}"
 
 
+def _product_base_quote(product_id: str) -> tuple[str, str]:
+    parts = product_id.upper().split("-")
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return "SOL", "USD"
+
+
+def _cfg_base_quote(cfg: Config) -> tuple[str, str]:
+    return cfg.real_base_asset.upper(), cfg.real_cash_asset.upper()
+
+
 class CoinbaseSpotExecutor:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -97,20 +108,31 @@ class CoinbaseSpotExecutor:
         )
 
     def health_check(self) -> dict[str, Any]:
-        product = _response_to_dict(self.client.get_product(self.cfg.coinbase_product_id))
+        product = self.product_snapshot()
         balances = self.available_balances()
+        base_currency, quote_currency = _product_base_quote(self.cfg.coinbase_product_id)
         return {
             "ok": True,
             "product_id": self.cfg.coinbase_product_id,
-            "product": {
-                "product_id": product.get("product_id") or product.get("product", {}).get("product_id"),
-                "price": product.get("price") or product.get("product", {}).get("price"),
-                "status": product.get("status") or product.get("product", {}).get("status"),
-            },
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "product": product,
             "balances": {
-                "USD": balances.get("USD", 0.0),
-                "SOL": balances.get("SOL", 0.0),
+                quote_currency: balances.get(quote_currency, 0.0),
+                base_currency: balances.get(base_currency, 0.0),
             },
+        }
+
+    def product_snapshot(self) -> dict[str, Any]:
+        data = _response_to_dict(self.client.get_product(self.cfg.coinbase_product_id))
+        product = data.get("product") if isinstance(data.get("product"), dict) else data
+        return {
+            "product_id": product.get("product_id") or self.cfg.coinbase_product_id,
+            "price": _float_or_zero(product.get("price")),
+            "status": product.get("status"),
+            "base_currency_id": product.get("base_currency_id") or product.get("base_currency"),
+            "quote_currency_id": product.get("quote_currency_id") or product.get("quote_currency"),
+            "raw": product,
         }
 
     def available_balances(self) -> dict[str, float]:
@@ -129,6 +151,87 @@ class CoinbaseSpotExecutor:
                 balance = _response_to_dict(balance)
             out[currency] = out.get(currency, 0.0) + _float_or_zero(balance.get("value"))
         return out
+
+    def account_details(self) -> list[dict[str, Any]]:
+        data = _response_to_dict(self.client.get_accounts())
+        accounts = data.get("accounts", [])
+        if not isinstance(accounts, list) and hasattr(accounts, "__iter__"):
+            accounts = list(accounts)
+        details: list[dict[str, Any]] = []
+        for raw in accounts if isinstance(accounts, list) else []:
+            account = _response_to_dict(raw)
+            currency = str(account.get("currency") or account.get("asset") or "").upper()
+            available = account.get("available_balance") or account.get("balance") or {}
+            hold = account.get("hold") or account.get("hold_balance") or {}
+            if not isinstance(available, dict):
+                available = _response_to_dict(available)
+            if not isinstance(hold, dict):
+                hold = _response_to_dict(hold)
+            if currency:
+                details.append(
+                    {
+                        "currency": currency,
+                        "available": _float_or_zero(available.get("value")),
+                        "hold": _float_or_zero(hold.get("value")),
+                        "uuid": account.get("uuid") or account.get("account_id"),
+                    }
+                )
+        return details
+
+    def list_orders_read_only(self, limit: int = 100, *, bot_only: bool = True) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit), 250))
+        if not hasattr(self.client, "list_orders"):
+            return {
+                "ok": False,
+                "error": "Installed Coinbase SDK does not expose list_orders(). Bot SQLite orders are still available.",
+                "orders": [],
+            }
+        attempts = [
+            {"product_id": self.cfg.coinbase_product_id, "limit": safe_limit},
+            {"product_ids": [self.cfg.coinbase_product_id], "limit": safe_limit},
+            {"limit": safe_limit},
+        ]
+        last_error: Exception | None = None
+        for kwargs in attempts:
+            try:
+                response = self.client.list_orders(**kwargs)
+                data = _response_to_dict(response)
+                return {"ok": True, "orders": self._normalize_orders(data, bot_only=bot_only)[:safe_limit]}
+            except TypeError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:  # noqa: BLE001 - expose read-only API errors safely.
+                return {"ok": False, "error": str(exc), "orders": []}
+        return {"ok": False, "error": str(last_error or "list_orders call failed"), "orders": []}
+
+    def _normalize_orders(self, data: dict[str, Any], *, bot_only: bool) -> list[dict[str, Any]]:
+        raw_orders = data.get("orders") or data.get("results") or []
+        if not isinstance(raw_orders, list) and hasattr(raw_orders, "__iter__"):
+            raw_orders = list(raw_orders)
+        orders: list[dict[str, Any]] = []
+        for raw in raw_orders if isinstance(raw_orders, list) else []:
+            order = _response_to_dict(raw)
+            product_id = str(order.get("product_id") or "")
+            if product_id and product_id != self.cfg.coinbase_product_id:
+                continue
+            client_order_id = str(order.get("client_order_id") or "")
+            if bot_only and not client_order_id.startswith("cryptopred-"):
+                continue
+            orders.append(
+                {
+                    "created_time": order.get("created_time") or order.get("created_at") or order.get("time"),
+                    "product_id": product_id or self.cfg.coinbase_product_id,
+                    "side": order.get("side"),
+                    "status": order.get("status"),
+                    "client_order_id": client_order_id,
+                    "order_id": order.get("order_id"),
+                    "filled_size": _float_or_zero(order.get("filled_size")),
+                    "filled_value": _float_or_zero(order.get("filled_value") or order.get("total_value_after_fees")),
+                    "average_price": _float_or_zero(order.get("average_filled_price")),
+                    "total_fees": _float_or_zero(order.get("total_fees") or order.get("fee")),
+                }
+            )
+        return orders
 
     def market_buy_quote(self, quote_usd: float) -> RealOrderResult:
         client_order_id = _client_order_id("buy", self.cfg.coinbase_product_id)
@@ -309,11 +412,16 @@ class RealTradeService:
 
     def public_status(self, *, refresh: bool = False) -> dict[str, Any]:
         state = self.store.real_state()
+        base_currency, quote_currency = _cfg_base_quote(self.cfg)
         payload: dict[str, Any] = {
             "configured": self.configured,
             "enabled": self.enabled,
             "armed": bool(state.get("armed")),
             "product_id": self.cfg.coinbase_product_id,
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "portfolio_mode": self.cfg.real_portfolio_mode,
+            "quick_arm_enabled": self.cfg.real_quick_arm_enabled,
             "max_total_usd": self.cfg.real_max_total_usd,
             "max_order_usd": self.cfg.real_max_order_usd,
             "min_order_usd": self.cfg.real_min_order_usd,
@@ -324,6 +432,8 @@ class RealTradeService:
             "last_error": state.get("last_error"),
             "latest_order": self.store.latest_real_order(),
             "credentials_present": bool(self.cfg.coinbase_api_key and self.cfg.coinbase_api_secret),
+            "arm_confirmation_text": self.arm_confirmation_text(),
+            "flatten_confirmation_text": self.flatten_confirmation_text(),
         }
         if refresh and self.executor is not None:
             try:
@@ -331,6 +441,86 @@ class RealTradeService:
             except Exception as exc:  # noqa: BLE001 - API status should report failures.
                 payload["exchange"] = {"ok": False, "error": str(exc)}
         return payload
+
+    def read_only_snapshot(self, *, ts: str, refresh_exchange: bool = True) -> dict[str, Any]:
+        state = self.store.real_state()
+        base_currency, quote_currency = _cfg_base_quote(self.cfg)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "ts": ts,
+            "configured": self.configured,
+            "enabled": self.enabled,
+            "product_id": self.cfg.coinbase_product_id,
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "state": state,
+            "latest_snapshot": self.store.latest_real_account_snapshot(),
+        }
+        if not refresh_exchange:
+            return payload
+        if not self.configured:
+            payload["ok"] = False
+            payload["error"] = "EXECUTION_MODE is not coinbase_live"
+            return payload
+        try:
+            self._ensure_executor_read_only()
+            assert self.executor is not None
+            balances = self.executor.available_balances()
+            accounts = self.executor.account_details()
+            quote_balance = balances.get(quote_currency, 0.0)
+            base_balance = balances.get(base_currency, 0.0)
+            payload.update(
+                {
+                    "balances": {quote_currency: quote_balance, base_currency: base_balance},
+                    "accounts": accounts,
+                }
+            )
+            product = self.executor.product_snapshot()
+            price = float(product.get("price") or 0.0)
+            bot_sol_qty = base_balance if self.cfg.real_portfolio_mode == "account_balances" else float(state.get("bot_sol_qty", 0.0))
+            bot_cost_usd = quote_balance if self.cfg.real_portfolio_mode == "account_balances" else float(state.get("bot_cost_usd", 0.0))
+            bot_market_value = bot_sol_qty * price
+            snapshot = {
+                "ts": ts,
+                "product_id": self.cfg.coinbase_product_id,
+                "price": price,
+                "usd_balance": quote_balance,
+                "sol_balance": base_balance,
+                "bot_sol_qty": bot_sol_qty,
+                "bot_cost_usd": bot_cost_usd,
+                "bot_market_value_usd": bot_market_value,
+                "bot_unrealized_pnl_usd": bot_market_value - bot_cost_usd,
+                "bot_realized_pnl_usd": float(state.get("realized_pnl_usd", 0.0)),
+                "bot_total_fees_usd": float(state.get("total_fees_usd", 0.0)),
+                "estimated_account_value_usd": quote_balance + base_balance * price,
+                "source": "coinbase",
+            }
+            self.store.insert_real_account_snapshot(snapshot)
+            payload.update(
+                {
+                    "product": product,
+                    "base_currency": base_currency,
+                    "quote_currency": quote_currency,
+                    "balances": {quote_currency: quote_balance, base_currency: base_balance},
+                    "accounts": accounts,
+                    "snapshot": snapshot,
+                    "latest_snapshot": snapshot,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - dashboard should show safe read-only failure.
+            payload["ok"] = False
+            payload["error"] = str(exc)
+        return payload
+
+    def exchange_orders_read_only(self, *, limit: int = 100, bot_only: bool = True) -> dict[str, Any]:
+        if not self.configured:
+            return {"ok": False, "error": "EXECUTION_MODE is not coinbase_live", "orders": []}
+        try:
+            self._ensure_executor_read_only()
+            assert self.executor is not None
+            return self.executor.list_orders_read_only(limit=limit, bot_only=bot_only)
+        except Exception as exc:  # noqa: BLE001 - expose read-only API errors safely.
+            return {"ok": False, "error": str(exc), "orders": []}
 
     def preflight(self) -> dict[str, Any]:
         self._require_executor()
@@ -349,6 +539,21 @@ class RealTradeService:
         self.store.insert_event(ts, "warning", "REAL TRADING ARMED")
         return self.public_status(refresh=True)
 
+    def quick_arm(self, *, ts: str) -> dict[str, Any]:
+        if not self.cfg.real_quick_arm_enabled:
+            raise RealTradingError("Set REAL_QUICK_ARM_ENABLED=true to arm from a one-click dashboard button")
+        self._require_executor()
+        self.preflight()
+        self.store.set_real_armed(armed=True, ts=ts, error=None)
+        self.store.insert_event(ts, "warning", "REAL TRADING ARMED BY QUICK BUTTON")
+        return self.public_status(refresh=True)
+
+    def toggle_arm(self, *, ts: str) -> dict[str, Any]:
+        state = self.store.real_state()
+        if bool(state.get("armed")):
+            return self.disarm(ts=ts, reason="quick_toggle")
+        return self.quick_arm(ts=ts)
+
     def disarm(self, *, ts: str, reason: str = "manual_disarm") -> dict[str, Any]:
         self.store.set_real_armed(armed=False, ts=ts, error=None)
         self.store.insert_event(ts, "info", f"real trading disarmed: {reason}")
@@ -364,19 +569,39 @@ class RealTradeService:
     ) -> None:
         if not self._can_execute(ts=ts, action="buy", candle_open_time=candle_open_time):
             return
+        if self.cfg.real_portfolio_mode == "account_balances":
+            self._execute_account_balance_buy(ts=ts, candle_open_time=candle_open_time, reason=reason)
+            return
         state = self.store.real_state()
         remaining_cap = self.cfg.real_max_total_usd - float(state["bot_cost_usd"])
-        requested_usd = min(float(planned_usd), self.cfg.real_max_order_usd, remaining_cap)
-        if requested_usd < self.cfg.real_min_order_usd:
-            self._record_skip(ts, candle_open_time, "buy", "BUY", requested_usd, 0.0, "below_real_min_or_cap")
+        planned_quote = max(float(planned_usd), self.cfg.real_min_order_usd)
+        requested_usd = min(planned_quote, self.cfg.real_max_order_usd, remaining_cap)
+        if requested_usd <= 0.0:
+            self._record_skip(ts, candle_open_time, "buy", "BUY", requested_usd, 0.0, "real_cap_exhausted")
             return
         assert self.executor is not None
         try:
-            balances = self.executor.available_balances()
-            requested_usd = min(requested_usd, balances.get("USD", 0.0))
-            if requested_usd < self.cfg.real_min_order_usd:
-                self._record_skip(ts, candle_open_time, "buy", "BUY", requested_usd, 0.0, "insufficient_usd_balance")
+            try:
+                self.executor.product_snapshot()
+            except Exception as exc:  # noqa: BLE001 - unsupported products must not place live orders.
+                self._record_error(ts, candle_open_time, "buy", "BUY", requested_usd, 0.0, str(exc))
+                self._disarm_on_uncertain_order(ts, str(exc))
                 return
+            balances = self.executor.available_balances()
+            _base_currency, quote_currency = _cfg_base_quote(self.cfg)
+            available_quote = balances.get(quote_currency, 0.0)
+            if available_quote <= 0.0:
+                self._record_skip(
+                    ts,
+                    candle_open_time,
+                    "buy",
+                    "BUY",
+                    requested_usd,
+                    0.0,
+                    f"insufficient_{quote_currency.lower()}_balance_available_0",
+                )
+                return
+            requested_usd = min(requested_usd, available_quote)
             result = self.executor.market_buy_quote(requested_usd)
             self._record_result(ts, candle_open_time, "buy", result, reason)
             if result.status in {"filled", "partial"} and result.filled_sol > 0.0:
@@ -402,6 +627,9 @@ class RealTradeService:
             require_armed=require_armed,
         ):
             return
+        if self.cfg.real_portfolio_mode == "account_balances":
+            self._execute_account_balance_sell_all(ts=ts, candle_open_time=candle_open_time, reason=reason)
+            return
         state = self.store.real_state()
         bot_sol_qty = float(state["bot_sol_qty"])
         if bot_sol_qty <= 0.0:
@@ -419,6 +647,42 @@ class RealTradeService:
             self._record_error(ts, candle_open_time, "sell", "SELL", 0.0, bot_sol_qty, str(exc))
             self._disarm_on_uncertain_order(ts, str(exc))
 
+    def _execute_account_balance_buy(self, *, ts: str, candle_open_time: str, reason: str) -> None:
+        assert self.executor is not None
+        try:
+            self.executor.product_snapshot()
+            _base_currency, quote_currency = _cfg_base_quote(self.cfg)
+            balances = self.executor.available_balances()
+            available_quote = balances.get(quote_currency, 0.0)
+            if available_quote <= 0.0:
+                self._record_skip(ts, candle_open_time, "buy_all_usd", "BUY", 0.0, 0.0, f"no_{quote_currency.lower()}_cash_available")
+                return
+            result = self.executor.market_buy_quote(available_quote)
+            self._record_result(ts, candle_open_time, "buy_all_usd", result, reason)
+            if result.status in {"unconfirmed", "rejected", "cancelled"}:
+                self._disarm_on_uncertain_order(ts, result.error or f"{result.status} buy")
+        except Exception as exc:  # noqa: BLE001 - persist and disarm on live errors.
+            self._record_error(ts, candle_open_time, "buy_all_usd", "BUY", 0.0, 0.0, str(exc))
+            self._disarm_on_uncertain_order(ts, str(exc))
+
+    def _execute_account_balance_sell_all(self, *, ts: str, candle_open_time: str, reason: str) -> None:
+        assert self.executor is not None
+        try:
+            self.executor.product_snapshot()
+            base_currency, _quote_currency = _cfg_base_quote(self.cfg)
+            balances = self.executor.available_balances()
+            available_base = balances.get(base_currency, 0.0)
+            if available_base <= 0.0:
+                self._record_skip(ts, candle_open_time, "sell_all_sol", "SELL", 0.0, 0.0, f"no_{base_currency.lower()}_position_available")
+                return
+            result = self.executor.market_sell_base(available_base)
+            self._record_result(ts, candle_open_time, "sell_all_sol", result, reason)
+            if result.status in {"unconfirmed", "rejected", "cancelled"}:
+                self._disarm_on_uncertain_order(ts, result.error or f"{result.status} sell")
+        except Exception as exc:  # noqa: BLE001 - persist and disarm on live errors.
+            self._record_error(ts, candle_open_time, "sell_all_sol", "SELL", 0.0, 0.0, str(exc))
+            self._disarm_on_uncertain_order(ts, str(exc))
+
     def flatten(self, *, token: str, confirmation: str, ts: str) -> dict[str, Any]:
         self._require_executor()
         if token != self.cfg.real_arm_token:
@@ -431,6 +695,8 @@ class RealTradeService:
         return self.public_status(refresh=True)
 
     def arm_confirmation_text(self) -> str:
+        if self.cfg.real_portfolio_mode == "account_balances":
+            return f"ARM REAL TRADING {self.cfg.coinbase_product_id} ACCOUNT BALANCES"
         cap = f"{self.cfg.real_max_total_usd:g}"
         return f"ARM REAL TRADING {self.cfg.coinbase_product_id} MAX {cap}"
 
@@ -442,6 +708,14 @@ class RealTradeService:
             raise RealTradingError("Set EXECUTION_MODE=coinbase_live first")
         if not self.enabled:
             raise RealTradingError("Set REAL_TRADING_ENABLED=true first")
+        if self.executor is None:
+            self.executor = CoinbaseSpotExecutor(self.cfg)
+
+    def _ensure_executor_read_only(self) -> None:
+        if not self.configured:
+            raise RealTradingError("Set EXECUTION_MODE=coinbase_live first")
+        if not self.cfg.coinbase_api_key or not self.cfg.coinbase_api_secret:
+            raise RealTradingError("Coinbase API credentials are missing")
         if self.executor is None:
             self.executor = CoinbaseSpotExecutor(self.cfg)
 

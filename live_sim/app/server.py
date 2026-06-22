@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -178,6 +180,8 @@ def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
             try:
                 if path == "/":
                     self.send_html(DASHBOARD_HTML)
+                elif path == "/real":
+                    self.send_html(REAL_DASHBOARD_HTML)
                 elif path == "/api/status":
                     self.send_json(api_status(ctx))
                 elif path == "/api/config":
@@ -199,8 +203,18 @@ def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
                 elif path == "/api/real/status":
                     refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes"}
                     self.send_json(ctx.real_trader.public_status(refresh=refresh))
+                elif path == "/api/real/snapshot":
+                    refresh = query.get("refresh", ["1"])[0].lower() in {"1", "true", "yes"}
+                    self.send_json(ctx.real_trader.read_only_snapshot(ts=now_iso(), refresh_exchange=refresh))
+                elif path == "/api/real/equity":
+                    self.send_json(ctx.store.recent_real_account_snapshots(get_limit(query, 1000)))
                 elif path == "/api/real/orders":
                     self.send_json(ctx.store.recent_real_orders(get_limit(query, 100)))
+                elif path == "/api/real/exchange-orders":
+                    bot_only = query.get("bot_only", ["1"])[0].lower() in {"1", "true", "yes"}
+                    self.send_json(ctx.real_trader.exchange_orders_read_only(limit=get_limit(query, 100), bot_only=bot_only))
+                elif path == "/api/real/models":
+                    self.send_json(api_real_models(ctx))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             except Exception as exc:  # noqa: BLE001 - return useful API error.
@@ -225,6 +239,12 @@ def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
             if path == "/api/real/disarm":
                 self.send_json(ctx.real_trader.disarm(ts=now_iso(), reason="api_disarm"))
                 return
+            if path == "/api/real/toggle-arm":
+                try:
+                    self.send_json(ctx.real_trader.toggle_arm(ts=now_iso()))
+                except Exception as exc:  # noqa: BLE001 - return useful API error.
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+                return
             if path == "/api/real/flatten":
                 try:
                     body = self.read_json_body()
@@ -235,6 +255,13 @@ def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
                             ts=now_iso(),
                         )
                     )
+                except Exception as exc:  # noqa: BLE001 - return useful API error.
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+                return
+            if path == "/api/real/models/switch":
+                try:
+                    body = self.read_json_body()
+                    self.send_json(api_switch_real_model(ctx, body))
                 except Exception as exc:  # noqa: BLE001 - return useful API error.
                     self.send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
                 return
@@ -332,6 +359,9 @@ def api_status(ctx: AppContext) -> dict[str, Any]:
             "catchup_retry_seconds": ctx.cfg.catchup_retry_seconds,
             "execution_mode": ctx.cfg.execution_mode,
             "real_trading_enabled": ctx.cfg.real_trading_enabled,
+            "real_portfolio_mode": ctx.cfg.real_portfolio_mode,
+            "real_cash_asset": ctx.cfg.real_cash_asset,
+            "real_base_asset": ctx.cfg.real_base_asset,
             "coinbase_product_id": ctx.cfg.coinbase_product_id,
             "real_max_total_usd": ctx.cfg.real_max_total_usd,
             "real_max_order_usd": ctx.cfg.real_max_order_usd,
@@ -361,6 +391,70 @@ def api_retraining(ctx: AppContext) -> dict[str, Any]:
         "latest_training_run": ctx.store.latest_training_run(),
         "recent_training_runs": ctx.store.recent_training_runs(20),
     }
+
+
+def api_real_models(ctx: AppContext) -> dict[str, Any]:
+    root = Path("/app/models/nn")
+    active = ctx.model.info()
+    models: list[dict[str, Any]] = []
+    if root.exists():
+        for path in sorted(root.glob("*/*/*/*/model.npz")):
+            rel = path.relative_to(root)
+            model_type, source, symbol, interval, _filename = rel.parts
+            compatible = source == "binance" and symbol.upper() == ctx.cfg.symbol and interval == ctx.cfg.interval
+            models.append(
+                {
+                    "id": f"{model_type}/{source}/{symbol}/{interval}",
+                    "model_type": model_type,
+                    "source": source,
+                    "symbol": symbol,
+                    "interval": interval,
+                    "path": str(path),
+                    "compatible": compatible,
+                    "active": Path(active.get("path", "")).resolve() == Path(ctx.cfg.model_path).resolve()
+                    and compatible
+                    and Path(ctx.cfg.model_path).exists()
+                    and _same_file_content_marker(Path(ctx.cfg.model_path), path),
+                }
+            )
+    return {
+        "active": active,
+        "required_symbol": ctx.cfg.symbol,
+        "required_interval": ctx.cfg.interval,
+        "models": models,
+    }
+
+
+def _same_file_content_marker(left: Path, right: Path) -> bool:
+    try:
+        left_stat = left.stat()
+        right_stat = right.stat()
+    except OSError:
+        return False
+    return left_stat.st_size == right_stat.st_size
+
+
+def api_switch_real_model(ctx: AppContext, body: dict[str, Any]) -> dict[str, Any]:
+    model_id = str(body.get("id") or "")
+    parts = model_id.split("/")
+    if len(parts) != 4:
+        raise ValueError("Model id must be model_type/source/symbol/interval")
+    model_type, source, symbol, interval = parts
+    if source != "binance" or symbol.upper() != ctx.cfg.symbol or interval != ctx.cfg.interval:
+        raise ValueError(
+            f"Real Coinbase model must match active live feed: binance/{ctx.cfg.symbol}/{ctx.cfg.interval}"
+        )
+    root = Path("/app/models/nn").resolve()
+    source_path = (root / model_type / source / symbol / interval / "model.npz").resolve()
+    if root not in source_path.parents or not source_path.exists():
+        raise FileNotFoundError(f"Model artifact not found: {model_id}")
+    target = Path(ctx.cfg.model_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ctx.real_trader.disarm(ts=now_iso(), reason=f"model_switch:{model_id}")
+    shutil.copyfile(source_path, target)
+    ctx.model.load()
+    ctx.store.insert_event(now_iso(), "warning", f"active model switched to {model_id}; real trading disarmed")
+    return {"ok": True, "message": "Model switched and real trading disarmed", "active": ctx.model.info()}
 
 
 def get_limit(query: dict[str, list[str]], default: int) -> int:
@@ -402,6 +496,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     * { box-sizing: border-box; }
     body { margin:0; font-family: Georgia, 'Times New Roman', serif; background: radial-gradient(circle at top left, #fff5cf, var(--bg) 42%, #ece0d0); color:var(--ink); }
     header { padding:22px 28px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:16px; align-items:flex-end; }
+    nav a { color:var(--ink); text-decoration:none; border:1px solid var(--line); background:#fffdf8; border-radius:999px; padding:7px 11px; margin-left:6px; }
+    nav a:hover { background:#f3ead9; }
     h1 { margin:0; font-size:28px; letter-spacing:-0.03em; }
     .sub { color:var(--muted); font-size:14px; }
     main { padding:22px; display:grid; gap:18px; }
@@ -438,7 +534,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <h1>CryptoPred Live Paper Trading</h1>
     <div class="sub" id="subtitle">Loading...</div>
   </div>
-  <div class="sub" id="realBanner">Real trading disabled by default.</div>
+  <div><nav><a href="/">Live</a><a href="/real">Real Coinbase</a></nav><div class="sub" id="realBanner" style="margin-top:10px;text-align:right">Real trading disabled by default.</div></div>
 </header>
 <main>
   <section class="cards" id="cards"></section>
@@ -446,7 +542,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="grid">
     <div class="panel">
       <div class="chart-head">
-        <div><h2>Bot Money Over Time</h2><div class="hint">Wheel to zoom, drag to pan, UTC time.</div></div>
+        <div><h2>Paper Bot Money Over Time</h2><div class="hint">Paper simulation only. Wheel to zoom, drag to pan, UTC time.</div></div>
         <div class="chart-controls"><button onclick="resetChart('moneyChart')">Reset</button></div>
       </div>
       <canvas id="moneyChart" width="900" height="300"></canvas>
@@ -460,8 +556,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
   <section class="grid">
-    <div class="panel"><h2>Recent Decisions</h2><div style="overflow:auto"><table id="decisions"></table></div></div>
-    <div class="panel"><h2>Recent Trades</h2><div style="overflow:auto"><table id="trades"></table></div></div>
+    <div class="panel"><h2>Recent Paper Decisions</h2><div class="hint">These rows are model/paper-sim decisions. A skip here is not a Coinbase order.</div><div style="overflow:auto"><table id="decisions"></table></div></div>
+    <div class="panel"><h2>Recent Paper Trades</h2><div class="hint">These are simulated fills using bid/ask, not exchange order confirmations.</div><div style="overflow:auto"><table id="trades"></table></div></div>
   </section>
 </main>
 <script>
@@ -510,6 +606,11 @@ async function flattenRealPosition(expectedText) {
 async function disarmRealTrading() {
   await postJson('/api/real/disarm', {});
   await refresh();
+}
+
+async function toggleRealTrading() {
+  await postJson('/api/real/toggle-arm', {});
+  await refresh(true);
 }
 
 const chartStates = new Map();
@@ -790,9 +891,9 @@ async function refresh() {
     const realModeText = realStatus.armed ? 'REAL TRADING ARMED' : (realStatus.enabled ? 'real trading disarmed' : 'real trading disabled');
     document.getElementById('realBanner').innerHTML = realStatus.armed ? `<span class="danger" style="padding:8px 12px;border-radius:999px">${realModeText}</span>` : realModeText;
     document.getElementById('cards').innerHTML = [
-      card('Total Bot Value', fmtUsd(acct.equity)), card('Cash', fmtUsd(acct.cash)), card('Currently Invested', fmtUsd(invested)), card('SOL Held', fmtNum(acct.sol_qty)),
+      card('Paper Bot Value', fmtUsd(acct.equity)), card('Paper Cash', fmtUsd(acct.cash)), card('Paper Invested', fmtUsd(invested)), card('Paper SOL Held', fmtNum(acct.sol_qty)),
       card('Bid / Ask', `${fmtUsd(tick.bid)} / ${fmtUsd(tick.ask)}`), card('Prob Up', fmtPct(dec.prob_up)),
-      card('Position', pos.quantity ? String(pos.side || 'long').toUpperCase() : 'CASH', pos.quantity ? 'buy' : ''), card('Last Action', dec.action || '-'),
+      card('Paper Position', pos.quantity ? String(pos.side || 'long').toUpperCase() : 'CASH', pos.quantity ? 'buy' : ''), card('Last Paper Action', dec.action ? `${dec.action}: ${dec.reason || ''}` : '-'),
       card('Retrain', retrain.running ? 'RUNNING' : (retrain.last_status || 'scheduled'), retrain.last_status === 'failed' ? 'error' : ''),
       card('Update Every', status.config.retrain_frequency || '-'),
       card('Train Window', status.config.retrain_train_start && status.config.retrain_train_end ? `${status.config.retrain_train_start.slice(0, 10)} → ${status.config.retrain_train_end.slice(0, 10)}` : `${status.config.retrain_lookback_days} days`),
@@ -802,28 +903,29 @@ async function refresh() {
       card('Next Retrain', shortTime(retrain.next_run_at)),
       card('Last Error', status.poller.last_error || catchup.error || 'none', status.poller.last_error || catchup.error ? 'error' : '')
     ].join('');
-    const armText = `ARM REAL TRADING ${realStatus.product_id} MAX ${Number(realStatus.max_total_usd || 20).toString()}`;
-    const flattenText = `FLATTEN REAL ${realStatus.product_id}`;
+    const armText = realStatus.arm_confirmation_text || `ARM REAL TRADING ${realStatus.product_id} MAX ${Number(realStatus.max_total_usd || 20).toString()}`;
+    const flattenText = realStatus.flatten_confirmation_text || `FLATTEN REAL ${realStatus.product_id}`;
+    const quoteCurrency = realStatus.quote_currency || String(realStatus.product_id || 'SOL-USD').split('-')[1] || 'USD';
     document.getElementById('realPanel').className = `panel ${realStatus.armed ? 'danger-card' : ''}`;
     document.getElementById('realPanel').innerHTML = `
       <div class="chart-head">
         <div>
           <h2>Real Coinbase Spot Trading</h2>
-          <div class="hint">Paper simulation remains separate. Real mode is SOL-USD spot long-only, capped at ${fmtUsd(realStatus.max_total_usd)} total and ${fmtUsd(realStatus.max_order_usd)} per order.</div>
+          <div class="hint">Paper simulation remains separate. Real mode is ${realStatus.product_id} spot long-only. Mode=${realStatus.portfolio_mode || 'account_balances'}.</div>
         </div>
         <div class="hint">${realStatus.configured ? 'Coinbase configured' : 'Paper mode only'}</div>
       </div>
       <div class="cards">
         ${card('Real Enabled', realStatus.enabled ? 'YES' : 'NO', realStatus.enabled ? 'sell' : '')}
         ${card('Armed', realStatus.armed ? 'YES' : 'NO', realStatus.armed ? 'sell' : '')}
-        ${card('Bot Real SOL', fmtNum(realStatus.bot_sol_qty))}
-        ${card('Bot Cost Basis', fmtUsd(realStatus.bot_cost_usd))}
+        ${card('Portfolio Mode', realStatus.portfolio_mode || '-')}
+        ${card('Tracked SOL', fmtNum(realStatus.bot_sol_qty))}
         ${card('Realized PnL', fmtUsd(realStatus.realized_pnl_usd), Number(realStatus.realized_pnl_usd) < 0 ? 'sell' : 'buy')}
         ${card('Real Fees', fmtUsd(realStatus.total_fees_usd))}
         ${card('Latest Real Error', realStatus.last_error || 'none', realStatus.last_error ? 'error' : '')}
       </div>
       <div class="real-actions">
-        <button class="danger" onclick="armRealTrading('${armText}')">Arm Real Trading</button>
+        <button class="danger" onclick="toggleRealTrading()">${realStatus.armed ? 'Disarm Real Trading' : 'Arm Real Trading'}</button>
         <button onclick="disarmRealTrading()">Disarm</button>
         <button class="danger" onclick="flattenRealPosition('${flattenText}')">Flatten Bot SOL</button>
       </div>
@@ -831,7 +933,7 @@ async function refresh() {
     `;
     renderTable(document.getElementById('realOrders'), realOrders, [
       ['Time', r => shortTime(r.ts)], ['Action', r => r.action], ['Status', r => r.status], ['Side', r => r.side],
-      ['Req USD', r => fmtUsd(r.requested_usd)], ['Fill USD', r => fmtUsd(r.filled_usd)], ['Fill SOL', r => fmtNum(r.filled_sol)],
+      [`Req ${quoteCurrency}`, r => fmtUsd(r.requested_usd)], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_usd)], ['Fill SOL', r => fmtNum(r.filled_sol)],
       ['Reason/Error', r => r.error || r.reason || '-']
     ]);
     drawMultiLine(document.getElementById('moneyChart'), equity, [
@@ -854,6 +956,231 @@ async function refresh() {
   }
 }
 refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>"""
+
+REAL_DASHBOARD_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CryptoPred Real Coinbase</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4efe6; --ink:#17130d; --muted:#756c60; --line:#d8cbbc; --card:#fffaf1; --green:#107a42; --red:#b3282f; --blue:#1f63b8; --amber:#b36b00; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: Georgia, 'Times New Roman', serif; background: radial-gradient(circle at top left, #fff2bd, var(--bg) 45%, #e9ddcc); color:var(--ink); }
+    header { padding:22px 28px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:16px; align-items:flex-end; }
+    h1 { margin:0; font-size:28px; letter-spacing:-0.03em; }
+    h2 { margin:0 0 10px; font-size:18px; }
+    .sub, .hint { color:var(--muted); font-size:13px; }
+    nav a { color:var(--ink); text-decoration:none; border:1px solid var(--line); background:#fffdf8; border-radius:999px; padding:7px 11px; margin-left:6px; }
+    nav a:hover { background:#f3ead9; }
+    main { padding:22px; display:grid; gap:18px; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(165px, 1fr)); gap:12px; }
+    .card, .panel { background:rgba(255,250,241,0.9); border:1px solid var(--line); border-radius:16px; box-shadow:0 12px 28px rgba(60,40,10,0.08); }
+    .card { padding:14px; }
+    .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.08em; }
+    .value { font-size:22px; margin-top:5px; font-weight:700; }
+    .panel { padding:16px; min-width:0; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .wide { grid-column:1 / -1; }
+    canvas { width:100%; height:300px; border-radius:12px; background:#fffdf8; border:1px solid #eadfcd; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:8px 6px; border-bottom:1px solid #eadfcd; text-align:right; white-space:nowrap; }
+    th:first-child, td:first-child { text-align:left; }
+    button, select { border:1px solid var(--line); background:#fffdf8; color:var(--ink); border-radius:999px; padding:7px 10px; cursor:pointer; font-family:inherit; }
+    button:hover, select:hover { background:#f3ead9; }
+    .danger { color:#fff; background:#a80f1b; border-color:#a80f1b; }
+    .good { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--amber); }
+    .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; }
+    .statusline { padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fffdf8; }
+    @media (max-width:900px) { header { display:block; } .grid { grid-template-columns:1fr; } nav { margin-top:12px; } }
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Real Coinbase Trading</h1>
+    <div class="sub" id="subtitle">Read-only Coinbase account view plus bot-tracked real SOL state.</div>
+  </div>
+  <nav><a href="/">Live</a><a href="/real">Real Coinbase</a></nav>
+</header>
+<main>
+  <section class="statusline" id="warning">Loading Coinbase status...</section>
+  <section class="cards" id="cards"></section>
+  <section class="panel">
+    <div class="toolbar">
+      <strong>Active real model</strong>
+      <select id="modelSelect"></select>
+      <button onclick="switchModel()">Switch Compatible Model</button>
+      <button id="quickArmBtn" class="danger" onclick="toggleRealTrading()">Arm Real Trading</button>
+      <button onclick="refresh(true)">Refresh Coinbase</button>
+      <span class="hint">Switching model disarms real trading. Only matching binance/SOLUSDT/current-interval artifacts are allowed.</span>
+    </div>
+    <div id="modelInfo" class="hint"></div>
+  </section>
+  <section class="grid">
+    <div class="panel wide">
+      <h2>Model Predictions Used By Live Bot</h2>
+      <div class="hint">This is the model probability history from paper/live decisions. Real Coinbase orders only happen when real trading is armed and the same live decision triggers a capped spot order.</div>
+      <canvas id="predictionChart" width="1200" height="300"></canvas>
+    </div>
+    <div class="panel wide">
+      <h2>Real Account Equity Estimate</h2>
+      <div class="hint">Quote-currency balance + Coinbase SOL balance marked to current product price. Wheel to zoom, drag to pan.</div>
+      <canvas id="equityChart" width="1200" height="330"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Coinbase SOL Price</h2>
+      <canvas id="priceChart" width="900" height="300"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Real Portfolio PnL / Fees</h2>
+      <canvas id="botChart" width="900" height="300"></canvas>
+    </div>
+  </section>
+  <section class="grid">
+    <div class="panel"><h2>Bot-Tracked Real Coinbase Orders</h2><div class="hint">Only orders this bot attempted or skipped. This is separate from paper decisions.</div><div style="overflow:auto"><table id="botOrders"></table></div></div>
+    <div class="panel"><h2>Coinbase Account Order History</h2><div class="toolbar"><label><input id="botOnly" type="checkbox" checked onchange="refresh(false)"> bot orders only</label></div><div class="hint">Read-only Coinbase API results. No orders are placed by this table.</div><div style="overflow:auto"><table id="exchangeOrders"></table></div></div>
+  </section>
+</main>
+<script>
+const fmtUsd = n => n == null || Number.isNaN(Number(n)) ? '-' : '$' + Number(n).toFixed(4);
+const fmtNum = n => n == null || Number.isNaN(Number(n)) ? '-' : Number(n).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
+const fmtPct = n => n == null || Number.isNaN(Number(n)) ? '-' : (Number(n) * 100).toFixed(3) + '%';
+const shortTime = s => !s ? '-' : new Date(s).toISOString().replace('T',' ').slice(0,19);
+const card = (label, value, cls='') => `<div class="card"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
+async function getJson(path) { const r = await fetch(path, {cache:'no-store'}); const data = await r.json(); if (!r.ok) throw new Error(data.error || r.statusText); return data; }
+async function postJson(path, body) { const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); const data = await r.json(); if (!r.ok || data.error) throw new Error(data.error || r.statusText); return data; }
+function renderTable(el, rows, cols) {
+  if (!rows || !rows.length) { el.innerHTML = '<tr><td>No rows yet</td></tr>'; return; }
+  el.innerHTML = '<thead><tr>' + cols.map(c => `<th>${c[0]}</th>`).join('') + '</tr></thead><tbody>' + rows.slice().reverse().map(r => '<tr>' + cols.map(c => `<td>${c[1](r)}</td>`).join('') + '</tr>').join('') + '</tbody>';
+}
+function balanceCards(accounts) {
+  const useful = (accounts || []).filter(a => Number(a.available || 0) !== 0 || Number(a.hold || 0) !== 0 || ['CAD','USD','SOL'].includes(String(a.currency || '').toUpperCase()));
+  if (!useful.length) return card('Coinbase Balances', 'none reported', 'warn');
+  return useful.map(a => card(`Coinbase ${a.currency}`, `${fmtNum(a.available)} available / ${fmtNum(a.hold)} hold`)).join('');
+}
+
+const chartStates = new Map();
+function plotBox(canvas) { return {left:60, top:24, width:canvas.width-82, height:canvas.height-72}; }
+function prepRows(rows) { return (rows || []).map(r => ({...r, _t: Date.parse(r.ts)})).filter(r => Number.isFinite(r._t)).sort((a,b)=>a._t-b._t); }
+function setupChart(canvas) {
+  if (canvas.dataset.ready) return; canvas.dataset.ready = '1';
+  canvas.addEventListener('wheel', e => { const s = chartStates.get(canvas.id); if (!s) return; e.preventDefault(); const p=plotBox(canvas); const rect=canvas.getBoundingClientRect(); const x=(e.clientX-rect.left)*canvas.width/rect.width; const f=Math.max(0,Math.min(1,(x-p.left)/p.width)); const range=s.maxT-s.minT; const next=Math.max(60000, range*(e.deltaY>0?1.25:0.8)); const center=s.minT+range*f; s.minT=center-next*f; s.maxT=center+next*(1-f); clamp(s); s.zoomed=true; drawStored(canvas.id); }, {passive:false});
+  canvas.addEventListener('pointerdown', e => { const s=chartStates.get(canvas.id); if (!s) return; canvas.setPointerCapture(e.pointerId); s.drag=true; s.dragX=e.clientX; s.dragMin=s.minT; s.dragMax=s.maxT; });
+  canvas.addEventListener('pointermove', e => { const s=chartStates.get(canvas.id); if (!s || !s.drag) return; const p=plotBox(canvas); const rect=canvas.getBoundingClientRect(); const dx=(e.clientX-s.dragX)*canvas.width/rect.width; const dt=-dx/p.width*(s.dragMax-s.dragMin); s.minT=s.dragMin+dt; s.maxT=s.dragMax+dt; clamp(s); s.zoomed=true; drawStored(canvas.id); });
+  canvas.addEventListener('pointerup', e => { const s=chartStates.get(canvas.id); if (s) s.drag=false; try { canvas.releasePointerCapture(e.pointerId); } catch {} });
+}
+function clamp(s) { const full=s.fullMax-s.fullMin; const range=s.maxT-s.minT; if (range>=full) {s.minT=s.fullMin; s.maxT=s.fullMax; return;} if (s.minT<s.fullMin) {s.minT=s.fullMin; s.maxT=s.fullMin+range;} if (s.maxT>s.fullMax) {s.maxT=s.fullMax; s.minT=s.fullMax-range;} }
+function drawLines(canvas, rows, series) {
+  setupChart(canvas); const clean=prepRows(rows); let fullMin=clean.length?clean[0]._t:NaN; let fullMax=clean.length?clean[clean.length-1]._t:NaN; if (fullMin===fullMax) {fullMin-=1800000; fullMax+=1800000;}
+  let s=chartStates.get(canvas.id); if (!s) {s={zoomed:false,minT:fullMin,maxT:fullMax,fullMin,fullMax,rows:clean,series}; chartStates.set(canvas.id,s);} s.rows=clean; s.series=series; s.fullMin=fullMin; s.fullMax=fullMax; if (!s.zoomed || !Number.isFinite(s.minT)) {s.minT=fullMin; s.maxT=fullMax;} else clamp(s); drawStored(canvas.id);
+}
+function drawStored(id) {
+  const canvas=document.getElementById(id); const s=chartStates.get(id); if (!canvas || !s) return; const ctx=canvas.getContext('2d'); const p=plotBox(canvas); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='#fffdf8'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  const vals=[]; for (const row of s.rows) if (row._t>=s.minT && row._t<=s.maxT) for (const ser of s.series) { const v=Number(row[ser.key]); if (Number.isFinite(v)) vals.push(v); }
+  ctx.strokeStyle='#d7c8b6'; ctx.beginPath(); ctx.moveTo(p.left,p.top); ctx.lineTo(p.left,p.top+p.height); ctx.lineTo(p.left+p.width,p.top+p.height); ctx.stroke();
+  if (!vals.length) { ctx.fillStyle='#756c60'; ctx.font='14px Georgia'; ctx.fillText('Waiting for Coinbase snapshots...', p.left+10, canvas.height/2); return; }
+  let min=Math.min(...vals), max=Math.max(...vals); if (min===max) { const b=Math.max(Math.abs(max)*0.001,0.01); min-=b; max+=b; }
+  ctx.font='11px Georgia'; ctx.fillStyle='#756c60'; ctx.fillText(max.toFixed(4),6,p.top+4); ctx.fillText(min.toFixed(4),6,p.top+p.height);
+  drawTimeAxis(ctx,p,s.minT,s.maxT); drawGrid(ctx,p,min,max);
+  s.series.forEach((ser,i)=>{ ctx.strokeStyle=ser.color; ctx.lineWidth=2; ctx.beginPath(); let started=false; for (const row of s.rows) { if (row._t<s.minT || row._t>s.maxT) continue; const v=Number(row[ser.key]); if (!Number.isFinite(v)) continue; const x=p.left+p.width*((row._t-s.minT)/(s.maxT-s.minT)); const y=p.top+p.height-p.height*((v-min)/(max-min)); if (!started) {ctx.moveTo(x,y); started=true;} else ctx.lineTo(x,y); } ctx.stroke(); ctx.fillStyle=ser.color; ctx.fillRect(p.left+8+i*155,8,12,3); ctx.fillText(ser.label,p.left+25+i*155,12); });
+}
+function drawGrid(ctx,p,min,max) { ctx.save(); ctx.strokeStyle='#eee3d1'; ctx.fillStyle='#756c60'; for (let i=1;i<4;i++){ const y=p.top+p.height*i/4; const v=max-(max-min)*i/4; ctx.beginPath(); ctx.moveTo(p.left,y); ctx.lineTo(p.left+p.width,y); ctx.stroke(); ctx.fillText(v.toFixed(4),6,y+4);} ctx.restore(); }
+function drawTimeAxis(ctx,p,minT,maxT){ const range=maxT-minT, minute=60000,hour=60*minute,day=24*hour; let step=range>45*day?14*day:range>14*day?7*day:range>3*day?day:range>day?6*hour:range>6*hour?hour:range>2*hour?30*minute:range>30*minute?10*minute:5*minute; const start=Math.ceil(minT/step)*step; ctx.save(); ctx.strokeStyle='#eee3d1'; ctx.fillStyle='#756c60'; for(let t=start;t<=maxT;t+=step){ const x=p.left+p.width*((t-minT)/range); ctx.beginPath(); ctx.moveTo(x,p.top); ctx.lineTo(x,p.top+p.height); ctx.stroke(); ctx.fillText(formatTick(t,range), Math.min(x+3,p.left+p.width-60), p.top+p.height+18);} ctx.restore(); }
+function formatTick(t,range){ const d=new Date(t); const m=d.toLocaleString('en-US',{month:'short',timeZone:'UTC'}); const day=d.toLocaleString('en-US',{day:'numeric',timeZone:'UTC'}); const hh=String(d.getUTCHours()).padStart(2,'0'); const mm=String(d.getUTCMinutes()).padStart(2,'0'); return range>86400000?`${m} ${day}`:`${hh}:${mm}`; }
+
+async function switchModel() {
+  const id = document.getElementById('modelSelect').value;
+  if (!id) return;
+  if (!confirm(`Switch active live model to ${id}? Real trading will be disarmed.`)) return;
+  await postJson('/api/real/models/switch', {id});
+  await refresh(true);
+}
+
+async function toggleRealTrading() {
+  await postJson('/api/real/toggle-arm', {});
+  await refresh(true);
+}
+
+async function renderModels() {
+  const data = await getJson('/api/real/models');
+  const select = document.getElementById('modelSelect');
+  select.innerHTML = data.models.map(m => `<option value="${m.id}" ${!m.compatible?'disabled':''}>${m.id}${m.compatible?'':' (not compatible)'}</option>`).join('');
+  const active = data.active || {};
+  document.getElementById('modelInfo').textContent = `Loaded model=${active.model_type || '-'} lookback=${active.lookback || '-'} channels=${(active.channels || []).join(', ')}`;
+}
+
+async function refresh(forceExchange=false) {
+  try {
+    const botOnly = document.getElementById('botOnly') ? document.getElementById('botOnly').checked : true;
+    const [status, snap, hist, decisions, botOrders, exchangeOrders] = await Promise.all([
+      getJson('/api/status'),
+      getJson(`/api/real/snapshot?refresh=${forceExchange ? 1 : 0}`),
+      getJson('/api/real/equity?limit=2000'),
+      getJson('/api/decisions?limit=2000'),
+      getJson('/api/real/orders?limit=100'),
+      getJson(`/api/real/exchange-orders?limit=100&bot_only=${botOnly ? 1 : 0}`)
+    ]);
+    const latest = snap.snapshot || snap.latest_snapshot || {};
+    const state = snap.state || {};
+    const armed = Boolean((status.real_trading || {}).armed);
+    const quickArmBtn = document.getElementById('quickArmBtn');
+    if (quickArmBtn) quickArmBtn.textContent = armed ? 'Disarm Real Trading' : 'Arm Real Trading';
+    const productId = snap.product_id || status.config.coinbase_product_id || 'SOL-USD';
+    const quoteCurrency = snap.quote_currency || productId.split('-')[1] || 'USD';
+    document.getElementById('warning').innerHTML = armed ? '<strong class="bad">REAL TRADING ARMED</strong>' : '<strong>Real trading is disarmed.</strong> This page uses read-only Coinbase calls unless you switch model, which only copies a local artifact and disarms trading.';
+    document.getElementById('cards').innerHTML = [
+      card('Coinbase Product', productId),
+      card(`${productId} Price`, fmtUsd(latest.price || (snap.product || {}).price)),
+      card(`Coinbase ${quoteCurrency}`, fmtUsd(latest.usd_balance || (snap.balances || {})[quoteCurrency])),
+      card('Available SOL', fmtNum(latest.sol_balance || (snap.balances || {}).SOL)),
+      card('Portfolio Value', fmtUsd(latest.estimated_account_value_usd)),
+      card('Current Side', Number(latest.sol_balance || (snap.balances || {}).SOL || 0) > 0 ? 'SOL position' : 'cash'),
+      card('SOL Market Value', fmtUsd(latest.bot_market_value_usd)),
+      card('Portfolio Mode', (status.real_trading || {}).portfolio_mode || 'account_balances'),
+      card('Realized PnL', fmtUsd(state.realized_pnl_usd), Number(state.realized_pnl_usd) < 0 ? 'bad' : 'good'),
+      card('Real Fees', fmtUsd(state.total_fees_usd)),
+      card('Read-only Status', snap.ok ? 'OK' : (snap.error || 'error'), snap.ok ? 'good' : 'bad'),
+      card('Latest Model Prob Up', fmtPct((status.latest_decision || {}).prob_up)),
+      balanceCards(snap.accounts || [])
+    ].join('');
+    const predictionRows = (decisions || []).map(r => ({
+      ...r,
+      long_entry_threshold: r.entry_threshold,
+      long_exit_threshold: r.exit_threshold
+    }));
+    drawLines(document.getElementById('predictionChart'), predictionRows, [
+      {key:'prob_up', label:'prob up', color:'#1f63b8'},
+      {key:'long_entry_threshold', label:'long entry', color:'#107a42'},
+      {key:'long_exit_threshold', label:'long exit', color:'#b3282f'}
+    ]);
+    drawLines(document.getElementById('equityChart'), hist, [
+      {key:'estimated_account_value_usd', label:`coinbase est. account (${quoteCurrency})`, color:'#107a42'},
+      {key:'bot_market_value_usd', label:'SOL market value', color:'#1f63b8'},
+      {key:'usd_balance', label:`available ${quoteCurrency}`, color:'#b36b00'}
+    ]);
+    drawLines(document.getElementById('priceChart'), hist, [{key:'price', label:productId, color:'#b3282f'}]);
+    drawLines(document.getElementById('botChart'), hist, [
+      {key:'bot_unrealized_pnl_usd', label:'unrealized PnL', color:'#107a42'},
+      {key:'bot_realized_pnl_usd', label:'realized PnL', color:'#1f63b8'},
+      {key:'bot_total_fees_usd', label:'fees', color:'#b3282f'}
+    ]);
+    renderTable(document.getElementById('botOrders'), botOrders, [
+      ['Time', r => shortTime(r.ts)], ['Action', r => r.action], ['Status', r => r.status], ['Side', r => r.side],
+      [`Req ${quoteCurrency}`, r => fmtUsd(r.requested_usd)], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_usd)], ['Fill SOL', r => fmtNum(r.filled_sol)], ['Reason/Error', r => r.error || r.reason || '-']
+    ]);
+    renderTable(document.getElementById('exchangeOrders'), exchangeOrders.orders || [], [
+      ['Time', r => shortTime(r.created_time)], ['Side', r => r.side], ['Status', r => r.status], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_value)], ['Fill SOL', r => fmtNum(r.filled_size)], ['Avg', r => fmtUsd(r.average_price)], ['Fees', r => fmtUsd(r.total_fees)]
+    ]);
+    await renderModels();
+  } catch (err) {
+    document.getElementById('warning').innerHTML = `<span class="bad">${err.message}</span>`;
+  }
+}
+refresh(true); setInterval(() => refresh(false), 15000);
 </script>
 </body>
 </html>"""

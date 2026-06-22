@@ -113,6 +113,9 @@ REAL_REQUIRE_MANUAL_ARM=true
 REAL_MAX_TOTAL_USD=20
 REAL_MAX_ORDER_USD=5
 REAL_MIN_ORDER_USD=1
+REAL_PORTFOLIO_MODE=account_balances
+REAL_CASH_ASSET=USD
+REAL_BASE_ASSET=SOL
 COINBASE_PRODUCT_ID=SOL-USD
 COINBASE_API_KEY=
 COINBASE_API_SECRET=
@@ -136,11 +139,11 @@ If the check passes, start the live server and arm from the dashboard:
 make live-up
 ```
 
-The dashboard requires `REAL_ARM_TOKEN` and this exact confirmation text before
+In `REAL_PORTFOLIO_MODE=account_balances`, available USD is treated as cash and available SOL is treated as the bot position. The dashboard requires `REAL_ARM_TOKEN` and this exact confirmation text before
 real orders are allowed:
 
 ```text
-ARM REAL TRADING SOL-USD MAX 20
+ARM REAL TRADING SOL-USD ACCOUNT BALANCES
 ```
 
 The bot still runs paper accounting separately. Real order attempts and fills are

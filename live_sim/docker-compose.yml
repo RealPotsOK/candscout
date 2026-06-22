@@ -16,4 +16,5 @@ services:
       - ./state:/app/state
       - ./app:/app/app:ro
       - ../src:/app/src:ro
+      - ../models:/app/models:ro
     restart: always
