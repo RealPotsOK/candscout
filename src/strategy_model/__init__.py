@@ -1,1 +1,1 @@
-"""Rule-based strategy models for CryptoPred."""
+"""Rule-based strategy models for CandScout."""

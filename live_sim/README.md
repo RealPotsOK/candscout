@@ -1,8 +1,8 @@
-# CryptoPred Live Paper-Trading Server
+# CandScout Live Paper-Trading Server
 
 This folder is isolated from the training/backtest pipeline. It runs a Dockerized paper-trading simulator for `SOLUSDT` using a saved sequence model such as MLP, CNN, GRU, or LSTM.
 
-By default it does not place real orders and does not require API keys. Optional Coinbase Advanced Trade spot execution is available only when explicitly enabled, manually armed, and capped to a small real-money limit.
+By default it does not place real orders and does not require API keys. Optional real spot execution is available through Coinbase or Jupiter/Solana only when explicitly enabled, manually armed, and capped to a small real-money limit.
 
 ## Quick Start
 
@@ -91,6 +91,75 @@ make test    # run local unit tests
 ```
 
 Runtime state stays in `live_sim/state/` and is intentionally ignored by git.
+
+## Optional Jupiter/Solana Real Spot Trading
+
+Recommended v1 setup:
+
+```text
+Dedicated burner wallet only
+SOL/USDC through Jupiter
+long-only buy/sell only
+no shorts, no borrowing, no margin, no leverage
+keep at least 0.02 SOL reserved for gas
+```
+
+Create a new Phantom or Solflare wallet only for this bot. Fund it with a small
+test amount, for example `0.05 SOL` for gas and `$20 USDC` for trading. Export
+only that burner wallet keypair and save it to the ignored path:
+
+```text
+live_sim/state/solana-keypair.json
+```
+
+Use an RPC provider such as Helius or QuickNode. Public RPC can work for checks,
+but it is less reliable for live order submission.
+
+Safe Jupiter defaults:
+
+```text
+EXECUTION_MODE=solana_jupiter_live
+REAL_TRADING_ENABLED=true
+REAL_REQUIRE_MANUAL_ARM=true
+REAL_QUICK_ARM_ENABLED=true
+REAL_MAX_ORDER_USD=20
+REAL_MIN_ORDER_USD=5
+REAL_PORTFOLIO_MODE=account_balances
+REAL_CASH_ASSET=USDC
+REAL_BASE_ASSET=SOL
+SOLANA_RPC_URL=<your RPC URL>
+SOLANA_KEYPAIR_PATH=/app/state/solana-keypair.json
+SOL_RESERVED_FOR_GAS=0.02
+JUPITER_PRODUCT_ID=SOL-USDC
+JUPITER_SLIPPAGE_BPS=50
+JUPITER_PRIORITY_FEE_LAMPORTS=auto
+REAL_ARM_TOKEN=<local token>
+```
+
+Preflight without placing orders:
+
+```bash
+make live-sync EXECUTION_MODE=solana_jupiter_live REAL_TRADING_ENABLED=true REAL_QUICK_ARM_ENABLED=true REAL_CASH_ASSET=USDC REAL_BASE_ASSET=SOL
+make live-real-check
+```
+
+If the check passes, start Docker and arm from the dashboard:
+
+```bash
+make live-up
+```
+
+Open:
+
+```text
+http://192.168.2.197:8080/real
+```
+
+In Jupiter mode, available USDC is treated as cash and available SOL, minus
+`SOL_RESERVED_FOR_GAS`, is treated as the bot position. Buy signals swap capped
+USDC to SOL. Sell signals swap capped SOL to USDC. Real swaps are never sent
+during startup catch-up, historical replay, retraining, or duplicate candle
+decisions.
 
 ## Optional Coinbase Real Spot Trading
 

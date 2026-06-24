@@ -171,7 +171,7 @@ def seconds_until_next_boundary(interval_seconds: int, delay_seconds: float) -> 
 
 def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CryptoPredLiveSim/1.0"
+        server_version = "CandScoutLiveSim/1.0"
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
             parsed = urlparse(self.path)
@@ -207,9 +207,11 @@ def make_handler(ctx: AppContext) -> type[BaseHTTPRequestHandler]:
                     refresh = query.get("refresh", ["1"])[0].lower() in {"1", "true", "yes"}
                     self.send_json(ctx.real_trader.read_only_snapshot(ts=now_iso(), refresh_exchange=refresh))
                 elif path == "/api/real/equity":
-                    self.send_json(ctx.store.recent_real_account_snapshots(get_limit(query, 1000)))
+                    source = query.get("source", [ctx.real_trader.execution_source])[0]
+                    self.send_json(ctx.store.recent_real_account_snapshots(get_limit(query, 1000), source=source))
                 elif path == "/api/real/orders":
-                    self.send_json(ctx.store.recent_real_orders(get_limit(query, 100)))
+                    source = query.get("source", [ctx.real_trader.execution_source])[0]
+                    self.send_json(ctx.store.recent_real_orders(get_limit(query, 100), source=source))
                 elif path == "/api/real/exchange-orders":
                     bot_only = query.get("bot_only", ["1"])[0].lower() in {"1", "true", "yes"}
                     self.send_json(ctx.real_trader.exchange_orders_read_only(limit=get_limit(query, 100), bot_only=bot_only))
@@ -363,6 +365,10 @@ def api_status(ctx: AppContext) -> dict[str, Any]:
             "real_cash_asset": ctx.cfg.real_cash_asset,
             "real_base_asset": ctx.cfg.real_base_asset,
             "coinbase_product_id": ctx.cfg.coinbase_product_id,
+            "jupiter_product_id": ctx.cfg.jupiter_product_id,
+            "solana_keypair_path": "present" if ctx.cfg.solana_keypair_path else "",
+            "sol_reserved_for_gas": ctx.cfg.sol_reserved_for_gas,
+            "jupiter_slippage_bps": ctx.cfg.jupiter_slippage_bps,
             "real_max_total_usd": ctx.cfg.real_max_total_usd,
             "real_max_order_usd": ctx.cfg.real_max_order_usd,
         },
@@ -442,7 +448,7 @@ def api_switch_real_model(ctx: AppContext, body: dict[str, Any]) -> dict[str, An
     model_type, source, symbol, interval = parts
     if source != "binance" or symbol.upper() != ctx.cfg.symbol or interval != ctx.cfg.interval:
         raise ValueError(
-            f"Real Coinbase model must match active live feed: binance/{ctx.cfg.symbol}/{ctx.cfg.interval}"
+            f"Real Trading model must match active live feed: binance/{ctx.cfg.symbol}/{ctx.cfg.interval}"
         )
     root = Path("/app/models/nn").resolve()
     source_path = (root / model_type / source / symbol / interval / "model.npz").resolve()
@@ -490,7 +496,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CryptoPred Live Paper Trading</title>
+  <title>CandScout Live Paper Trading</title>
   <style>
     :root { color-scheme: light; --bg:#f6f1e8; --ink:#16140f; --muted:#70685d; --line:#d9cdbd; --card:#fffaf1; --green:#128b4b; --red:#bc2f35; --blue:#2268c4; }
     * { box-sizing: border-box; }
@@ -531,10 +537,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 <body>
 <header>
   <div>
-    <h1>CryptoPred Live Paper Trading</h1>
+    <h1>CandScout Live Paper Trading</h1>
     <div class="sub" id="subtitle">Loading...</div>
   </div>
-  <div><nav><a href="/">Live</a><a href="/real">Real Coinbase</a></nav><div class="sub" id="realBanner" style="margin-top:10px;text-align:right">Real trading disabled by default.</div></div>
+  <div><nav><a href="/">Live</a><a href="/real">Real Trading</a></nav><div class="sub" id="realBanner" style="margin-top:10px;text-align:right">Real trading disabled by default.</div></div>
 </header>
 <main>
   <section class="cards" id="cards"></section>
@@ -556,7 +562,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
   <section class="grid">
-    <div class="panel"><h2>Recent Paper Decisions</h2><div class="hint">These rows are model/paper-sim decisions. A skip here is not a Coinbase order.</div><div style="overflow:auto"><table id="decisions"></table></div></div>
+    <div class="panel"><h2>Recent Paper Decisions</h2><div class="hint">These rows are model/paper-sim decisions. A skip here is not a real order.</div><div style="overflow:auto"><table id="decisions"></table></div></div>
     <div class="panel"><h2>Recent Paper Trades</h2><div class="hint">These are simulated fills using bid/ask, not exchange order confirmations.</div><div style="overflow:auto"><table id="trades"></table></div></div>
   </section>
 </main>
@@ -910,10 +916,10 @@ async function refresh() {
     document.getElementById('realPanel').innerHTML = `
       <div class="chart-head">
         <div>
-          <h2>Real Coinbase Spot Trading</h2>
-          <div class="hint">Paper simulation remains separate. Real mode is ${realStatus.product_id} spot long-only. Mode=${realStatus.portfolio_mode || 'account_balances'}.</div>
+          <h2>Real Spot Trading</h2>
+          <div class="hint">Paper simulation remains separate. Real backend is ${realStatus.execution_source || 'unknown'} on ${realStatus.product_id}; spot long-only. Mode=${realStatus.portfolio_mode || 'account_balances'}.</div>
         </div>
-        <div class="hint">${realStatus.configured ? 'Coinbase configured' : 'Paper mode only'}</div>
+        <div class="hint">${realStatus.configured ? 'Real backend configured' : 'Paper mode only'}</div>
       </div>
       <div class="cards">
         ${card('Real Enabled', realStatus.enabled ? 'YES' : 'NO', realStatus.enabled ? 'sell' : '')}
@@ -965,7 +971,7 @@ REAL_DASHBOARD_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CryptoPred Real Coinbase</title>
+  <title>CandScout Real Trading</title>
   <style>
     :root { color-scheme: light; --bg:#f4efe6; --ink:#17130d; --muted:#756c60; --line:#d8cbbc; --card:#fffaf1; --green:#107a42; --red:#b3282f; --blue:#1f63b8; --amber:#b36b00; }
     * { box-sizing:border-box; }
@@ -1001,13 +1007,13 @@ REAL_DASHBOARD_HTML = r"""<!doctype html>
 <body>
 <header>
   <div>
-    <h1>Real Coinbase Trading</h1>
-    <div class="sub" id="subtitle">Read-only Coinbase account view plus bot-tracked real SOL state.</div>
+    <h1>Real Trading</h1>
+    <div class="sub" id="subtitle">Read-only burner-wallet view plus bot-tracked swap state.</div>
   </div>
-  <nav><a href="/">Live</a><a href="/real">Real Coinbase</a></nav>
+  <nav><a href="/">Live</a><a href="/real">Real Trading</a></nav>
 </header>
 <main>
-  <section class="statusline" id="warning">Loading Coinbase status...</section>
+  <section class="statusline" id="warning">Loading real trading status...</section>
   <section class="cards" id="cards"></section>
   <section class="panel">
     <div class="toolbar">
@@ -1015,7 +1021,7 @@ REAL_DASHBOARD_HTML = r"""<!doctype html>
       <select id="modelSelect"></select>
       <button onclick="switchModel()">Switch Compatible Model</button>
       <button id="quickArmBtn" class="danger" onclick="toggleRealTrading()">Arm Real Trading</button>
-      <button onclick="refresh(true)">Refresh Coinbase</button>
+      <button onclick="refresh(true)">Refresh Real Backend</button>
       <span class="hint">Switching model disarms real trading. Only matching binance/SOLUSDT/current-interval artifacts are allowed.</span>
     </div>
     <div id="modelInfo" class="hint"></div>
@@ -1023,26 +1029,26 @@ REAL_DASHBOARD_HTML = r"""<!doctype html>
   <section class="grid">
     <div class="panel wide">
       <h2>Model Predictions Used By Live Bot</h2>
-      <div class="hint">This is the model probability history from paper/live decisions. Real Coinbase orders only happen when real trading is armed and the same live decision triggers a capped spot order.</div>
+      <div class="hint">This is the model probability history from paper/live decisions. Real Trading orders only happen when real trading is armed and the same live decision triggers a capped spot order.</div>
       <canvas id="predictionChart" width="1200" height="300"></canvas>
     </div>
     <div class="panel wide">
-      <h2>Real Account Equity Estimate</h2>
-      <div class="hint">Quote-currency balance + Coinbase SOL balance marked to current product price. Wheel to zoom, drag to pan.</div>
+      <h2 id="equityTitle">Real Wallet Equity Estimate</h2>
+      <div class="hint" id="equityHint">Quote-currency balance + real SOL balance marked to current product price. Wheel to zoom, drag to pan.</div>
       <canvas id="equityChart" width="1200" height="330"></canvas>
     </div>
     <div class="panel">
-      <h2>Coinbase SOL Price</h2>
+      <h2 id="priceTitle">Real SOL Price</h2>
       <canvas id="priceChart" width="900" height="300"></canvas>
     </div>
     <div class="panel">
-      <h2>Real Portfolio PnL / Fees</h2>
+      <h2 id="pnlTitle">Real Wallet PnL / Fees</h2>
       <canvas id="botChart" width="900" height="300"></canvas>
     </div>
   </section>
   <section class="grid">
-    <div class="panel"><h2>Bot-Tracked Real Coinbase Orders</h2><div class="hint">Only orders this bot attempted or skipped. This is separate from paper decisions.</div><div style="overflow:auto"><table id="botOrders"></table></div></div>
-    <div class="panel"><h2>Coinbase Account Order History</h2><div class="toolbar"><label><input id="botOnly" type="checkbox" checked onchange="refresh(false)"> bot orders only</label></div><div class="hint">Read-only Coinbase API results. No orders are placed by this table.</div><div style="overflow:auto"><table id="exchangeOrders"></table></div></div>
+    <div class="panel"><h2 id="ordersTitle">Bot-Tracked Real Trading Orders</h2><div class="hint" id="ordersHint">Only orders/swaps this bot attempted or skipped. This is separate from paper decisions.</div><div style="overflow:auto"><table id="botOrders"></table></div></div>
+    <div class="panel"><h2 id="exchangeOrdersTitle">Exchange Account Order History</h2><div class="toolbar"><label><input id="botOnly" type="checkbox" checked onchange="refresh(false)"> bot orders only</label></div><div class="hint">Read-only exchange API results. No orders are placed by this table.</div><div style="overflow:auto"><table id="exchangeOrders"></table></div></div>
   </section>
 </main>
 <script>
@@ -1057,10 +1063,12 @@ function renderTable(el, rows, cols) {
   if (!rows || !rows.length) { el.innerHTML = '<tr><td>No rows yet</td></tr>'; return; }
   el.innerHTML = '<thead><tr>' + cols.map(c => `<th>${c[0]}</th>`).join('') + '</tr></thead><tbody>' + rows.slice().reverse().map(r => '<tr>' + cols.map(c => `<td>${c[1](r)}</td>`).join('') + '</tr>').join('') + '</tbody>';
 }
-function balanceCards(accounts) {
-  const useful = (accounts || []).filter(a => Number(a.available || 0) !== 0 || Number(a.hold || 0) !== 0 || ['CAD','USD','SOL'].includes(String(a.currency || '').toUpperCase()));
-  if (!useful.length) return card('Coinbase Balances', 'none reported', 'warn');
-  return useful.map(a => card(`Coinbase ${a.currency}`, `${fmtNum(a.available)} available / ${fmtNum(a.hold)} hold`)).join('');
+function balanceCards(accounts, isJupiter=false) {
+  const currencies = isJupiter ? ['USDC','SOL'] : ['CAD','USD','USDC','SOL'];
+  const useful = (accounts || []).filter(a => Number(a.available || 0) !== 0 || Number(a.hold || 0) !== 0 || currencies.includes(String(a.currency || '').toUpperCase()));
+  if (!useful.length) return card(isJupiter ? 'Burner Wallet Balances' : 'Exchange Balances', 'none reported', 'warn');
+  const prefix = isJupiter ? 'Burner' : 'Exchange';
+  return useful.map(a => card(`${prefix} ${a.currency}`, `${fmtNum(a.available)} available / ${fmtNum(a.hold)} hold`)).join('');
 }
 
 const chartStates = new Map();
@@ -1082,7 +1090,7 @@ function drawStored(id) {
   const canvas=document.getElementById(id); const s=chartStates.get(id); if (!canvas || !s) return; const ctx=canvas.getContext('2d'); const p=plotBox(canvas); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='#fffdf8'; ctx.fillRect(0,0,canvas.width,canvas.height);
   const vals=[]; for (const row of s.rows) if (row._t>=s.minT && row._t<=s.maxT) for (const ser of s.series) { const v=Number(row[ser.key]); if (Number.isFinite(v)) vals.push(v); }
   ctx.strokeStyle='#d7c8b6'; ctx.beginPath(); ctx.moveTo(p.left,p.top); ctx.lineTo(p.left,p.top+p.height); ctx.lineTo(p.left+p.width,p.top+p.height); ctx.stroke();
-  if (!vals.length) { ctx.fillStyle='#756c60'; ctx.font='14px Georgia'; ctx.fillText('Waiting for Coinbase snapshots...', p.left+10, canvas.height/2); return; }
+  if (!vals.length) { ctx.fillStyle='#756c60'; ctx.font='14px Georgia'; ctx.fillText('Waiting for real account snapshots...', p.left+10, canvas.height/2); return; }
   let min=Math.min(...vals), max=Math.max(...vals); if (min===max) { const b=Math.max(Math.abs(max)*0.001,0.01); min-=b; max+=b; }
   ctx.font='11px Georgia'; ctx.fillStyle='#756c60'; ctx.fillText(max.toFixed(4),6,p.top+4); ctx.fillText(min.toFixed(4),6,p.top+p.height);
   drawTimeAxis(ctx,p,s.minT,s.maxT); drawGrid(ctx,p,min,max);
@@ -1116,36 +1124,50 @@ async function renderModels() {
 async function refresh(forceExchange=false) {
   try {
     const botOnly = document.getElementById('botOnly') ? document.getElementById('botOnly').checked : true;
-    const [status, snap, hist, decisions, botOrders, exchangeOrders] = await Promise.all([
+    const [status, snap, decisions, exchangeOrders] = await Promise.all([
       getJson('/api/status'),
       getJson(`/api/real/snapshot?refresh=${forceExchange ? 1 : 0}`),
-      getJson('/api/real/equity?limit=2000'),
       getJson('/api/decisions?limit=2000'),
-      getJson('/api/real/orders?limit=100'),
       getJson(`/api/real/exchange-orders?limit=100&bot_only=${botOnly ? 1 : 0}`)
+    ]);
+    const source = ((status.real_trading || {}).execution_source) || snap.execution_source || 'coinbase';
+    const [hist, botOrders] = await Promise.all([
+      getJson(`/api/real/equity?limit=2000&source=${encodeURIComponent(source)}`),
+      getJson(`/api/real/orders?limit=100&source=${encodeURIComponent(source)}`)
     ]);
     const latest = snap.snapshot || snap.latest_snapshot || {};
     const state = snap.state || {};
-    const armed = Boolean((status.real_trading || {}).armed);
+    const realTrading = status.real_trading || {};
+    const isJupiter = source === 'jupiter_solana';
+    const backendLabel = isJupiter ? 'Jupiter / Solana burner wallet' : 'Coinbase Advanced Trade account';
+    const armed = Boolean(realTrading.armed);
     const quickArmBtn = document.getElementById('quickArmBtn');
     if (quickArmBtn) quickArmBtn.textContent = armed ? 'Disarm Real Trading' : 'Arm Real Trading';
-    const productId = snap.product_id || status.config.coinbase_product_id || 'SOL-USD';
-    const quoteCurrency = snap.quote_currency || productId.split('-')[1] || 'USD';
-    document.getElementById('warning').innerHTML = armed ? '<strong class="bad">REAL TRADING ARMED</strong>' : '<strong>Real trading is disarmed.</strong> This page uses read-only Coinbase calls unless you switch model, which only copies a local artifact and disarms trading.';
+    const productId = snap.product_id || (isJupiter ? status.config.jupiter_product_id : status.config.coinbase_product_id) || 'SOL-USDC';
+    const quoteCurrency = snap.quote_currency || (isJupiter ? 'USDC' : productId.split('-')[1]) || 'USD';
+    document.getElementById('equityTitle').textContent = isJupiter ? 'Burner Wallet Equity Estimate' : 'Coinbase Account Equity Estimate';
+    document.getElementById('equityHint').textContent = isJupiter ? 'Burner wallet USDC + spendable SOL, marked through Jupiter SOL/USDC price. Wheel to zoom, drag to pan.' : 'Quote-currency balance + real SOL balance marked to current product price. Wheel to zoom, drag to pan.';
+    document.getElementById('priceTitle').textContent = `${productId} Price`;
+    document.getElementById('pnlTitle').textContent = isJupiter ? 'Jupiter Swap PnL / Fees' : 'Real Portfolio PnL / Fees';
+    document.getElementById('ordersTitle').textContent = isJupiter ? 'Bot-Tracked Jupiter Swaps' : 'Bot-Tracked Coinbase Orders';
+    document.getElementById('ordersHint').textContent = isJupiter ? 'Only Jupiter swaps this bot attempted or skipped from the burner wallet. This is separate from paper decisions.' : 'Only Coinbase orders this bot attempted or skipped. This is separate from paper decisions.';
+    document.getElementById('exchangeOrdersTitle').textContent = isJupiter ? 'Jupiter Swap History' : 'Exchange Account Order History';
+    document.getElementById('warning').innerHTML = armed ? `<strong class="bad">REAL TRADING ARMED</strong> ${backendLabel}` : `<strong>Real trading is disarmed.</strong> Viewing ${backendLabel}. This page uses read-only backend calls unless you switch model, which only copies a local artifact and disarms trading.`;
     document.getElementById('cards').innerHTML = [
-      card('Coinbase Product', productId),
+      card('Real Backend', backendLabel),
+      card('Real Product', productId),
       card(`${productId} Price`, fmtUsd(latest.price || (snap.product || {}).price)),
-      card(`Coinbase ${quoteCurrency}`, fmtUsd(latest.usd_balance || (snap.balances || {})[quoteCurrency])),
-      card('Available SOL', fmtNum(latest.sol_balance || (snap.balances || {}).SOL)),
-      card('Portfolio Value', fmtUsd(latest.estimated_account_value_usd)),
-      card('Current Side', Number(latest.sol_balance || (snap.balances || {}).SOL || 0) > 0 ? 'SOL position' : 'cash'),
-      card('SOL Market Value', fmtUsd(latest.bot_market_value_usd)),
-      card('Portfolio Mode', (status.real_trading || {}).portfolio_mode || 'account_balances'),
+      card(isJupiter ? 'Burner USDC' : `Exchange ${quoteCurrency}`, fmtUsd(latest.usd_balance || (snap.balances || {})[quoteCurrency])),
+      card(isJupiter ? 'Burner Spendable SOL' : 'Available SOL', fmtNum(latest.sol_balance || (snap.balances || {}).SOL)),
+      card(isJupiter ? 'Burner Wallet Value' : 'Portfolio Value', fmtUsd(latest.estimated_account_value_usd)),
+      card('Current Side', Number(latest.sol_balance || (snap.balances || {}).SOL || 0) > 0 ? 'SOL position' : quoteCurrency),
+      card(isJupiter ? 'Spendable SOL Value' : 'SOL Market Value', fmtUsd(latest.bot_market_value_usd)),
+      card('Portfolio Mode', realTrading.portfolio_mode || 'account_balances'),
       card('Realized PnL', fmtUsd(state.realized_pnl_usd), Number(state.realized_pnl_usd) < 0 ? 'bad' : 'good'),
       card('Real Fees', fmtUsd(state.total_fees_usd)),
       card('Read-only Status', snap.ok ? 'OK' : (snap.error || 'error'), snap.ok ? 'good' : 'bad'),
       card('Latest Model Prob Up', fmtPct((status.latest_decision || {}).prob_up)),
-      balanceCards(snap.accounts || [])
+      balanceCards(snap.accounts || [], isJupiter)
     ].join('');
     const predictionRows = (decisions || []).map(r => ({
       ...r,
@@ -1158,9 +1180,9 @@ async function refresh(forceExchange=false) {
       {key:'long_exit_threshold', label:'long exit', color:'#b3282f'}
     ]);
     drawLines(document.getElementById('equityChart'), hist, [
-      {key:'estimated_account_value_usd', label:`coinbase est. account (${quoteCurrency})`, color:'#107a42'},
+      {key:'estimated_account_value_usd', label:isJupiter ? 'burner wallet value' : `real est. account (${quoteCurrency})`, color:'#107a42'},
       {key:'bot_market_value_usd', label:'SOL market value', color:'#1f63b8'},
-      {key:'usd_balance', label:`available ${quoteCurrency}`, color:'#b36b00'}
+      {key:'usd_balance', label:isJupiter ? 'available USDC' : `available ${quoteCurrency}`, color:'#b36b00'}
     ]);
     drawLines(document.getElementById('priceChart'), hist, [{key:'price', label:productId, color:'#b3282f'}]);
     drawLines(document.getElementById('botChart'), hist, [
@@ -1170,7 +1192,7 @@ async function refresh(forceExchange=false) {
     ]);
     renderTable(document.getElementById('botOrders'), botOrders, [
       ['Time', r => shortTime(r.ts)], ['Action', r => r.action], ['Status', r => r.status], ['Side', r => r.side],
-      [`Req ${quoteCurrency}`, r => fmtUsd(r.requested_usd)], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_usd)], ['Fill SOL', r => fmtNum(r.filled_sol)], ['Reason/Error', r => r.error || r.reason || '-']
+      [`Req ${quoteCurrency}`, r => fmtUsd(r.requested_usd)], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_usd)], ['Fill SOL', r => fmtNum(r.filled_sol)], [isJupiter ? 'Tx / Reason' : 'Reason/Error', r => r.transaction_signature ? `<a href="https://solscan.io/tx/${r.transaction_signature}" target="_blank">tx</a>` : (r.error || r.reason || '-')]
     ]);
     renderTable(document.getElementById('exchangeOrders'), exchangeOrders.orders || [], [
       ['Time', r => shortTime(r.created_time)], ['Side', r => r.side], ['Status', r => r.status], [`Fill ${quoteCurrency}`, r => fmtUsd(r.filled_value)], ['Fill SOL', r => fmtNum(r.filled_size)], ['Avg', r => fmtUsd(r.average_price)], ['Fees', r => fmtUsd(r.total_fees)]

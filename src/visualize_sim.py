@@ -651,7 +651,7 @@ def html_template(title: str, data: dict, nav: str) -> str:
       white-space: pre-line;
     }
   </style>
-  <link rel="stylesheet" href="/assets/cryptopred.css">
+  <link rel="stylesheet" href="/assets/candscout.css">
 </head>
 <body>
   <header>

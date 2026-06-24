@@ -18,7 +18,7 @@ help:
 	@echo "  make reset  - stop server and remove SQLite runtime state, keeping model.npz"
 	@echo "  make shell  - open shell in the running container"
 	@echo "  make test   - run local unit tests"
-	@echo "  make real-check - validate Coinbase config/balances without placing orders"
+	@echo "  make real-check - validate real execution config/balances without placing orders"
 	@echo "  make retrain-status - show retraining scheduler status"
 	@echo "  make retrain-now    - manually start retrain if ALLOW_RESET_API=true"
 	@echo "  make clear-stale-retrain-lock - remove retrain.lock only when no retrain is running"

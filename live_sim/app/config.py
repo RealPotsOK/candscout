@@ -96,6 +96,17 @@ class Config:
     coinbase_api_key: str
     coinbase_api_secret: str
     coinbase_timeout: float
+    solana_rpc_url: str
+    solana_keypair_path: str
+    sol_reserved_for_gas: float
+    solana_rpc_timeout: float
+    solana_confirm_polls: int
+    solana_confirm_delay_seconds: float
+    jupiter_base_url: str
+    jupiter_product_id: str
+    jupiter_slippage_bps: int
+    jupiter_priority_fee_lamports: str
+    jupiter_timeout: float
     real_arm_token: str
     real_order_status_polls: int
     real_order_status_delay_seconds: float
@@ -109,7 +120,7 @@ class Config:
     def public_dict(self) -> dict:
         data = asdict(self)
         data["interval_seconds"] = self.interval_seconds
-        for key in ["coinbase_api_key", "coinbase_api_secret", "real_arm_token"]:
+        for key in ["coinbase_api_key", "coinbase_api_secret", "real_arm_token", "solana_rpc_url", "solana_keypair_path"]:
             data[key] = "present" if data.get(key) else ""
         return data
 
@@ -252,6 +263,17 @@ def load_config() -> Config:
         coinbase_api_key=env_str("COINBASE_API_KEY", ""),
         coinbase_api_secret=env_str("COINBASE_API_SECRET", ""),
         coinbase_timeout=env_float("COINBASE_TIMEOUT", 10.0),
+        solana_rpc_url=env_str("SOLANA_RPC_URL", ""),
+        solana_keypair_path=env_str("SOLANA_KEYPAIR_PATH", "/app/state/solana-keypair.json"),
+        sol_reserved_for_gas=env_float("SOL_RESERVED_FOR_GAS", 0.02),
+        solana_rpc_timeout=env_float("SOLANA_RPC_TIMEOUT", 10.0),
+        solana_confirm_polls=env_int("SOLANA_CONFIRM_POLLS", 20),
+        solana_confirm_delay_seconds=env_float("SOLANA_CONFIRM_DELAY_SECONDS", 1.0),
+        jupiter_base_url=env_str("JUPITER_BASE_URL", "https://lite-api.jup.ag/swap/v1"),
+        jupiter_product_id=env_str("JUPITER_PRODUCT_ID", "SOL-USDC").upper(),
+        jupiter_slippage_bps=env_int("JUPITER_SLIPPAGE_BPS", 50),
+        jupiter_priority_fee_lamports=env_str("JUPITER_PRIORITY_FEE_LAMPORTS", "auto"),
+        jupiter_timeout=env_float("JUPITER_TIMEOUT", 10.0),
         real_arm_token=env_str("REAL_ARM_TOKEN", ""),
         real_order_status_polls=env_int("REAL_ORDER_STATUS_POLLS", 5),
         real_order_status_delay_seconds=env_float("REAL_ORDER_STATUS_DELAY_SECONDS", 0.75),
@@ -354,8 +376,8 @@ def validate_config(cfg: Config) -> None:
         raise ValueError("TRAIN_L2 cannot be negative")
     if cfg.train_class_weight_mode not in {"none", "balanced", "manual"}:
         raise ValueError("TRAIN_CLASS_WEIGHT_MODE must be none, balanced, or manual")
-    if cfg.execution_mode not in {"paper", "coinbase_live"}:
-        raise ValueError("EXECUTION_MODE must be paper or coinbase_live")
+    if cfg.execution_mode not in {"paper", "coinbase_live", "solana_jupiter_live"}:
+        raise ValueError("EXECUTION_MODE must be paper, coinbase_live, or solana_jupiter_live")
     if cfg.real_portfolio_mode not in {"account_balances", "capped_bot_tracked"}:
         raise ValueError("REAL_PORTFOLIO_MODE must be account_balances or capped_bot_tracked")
     if not cfg.real_cash_asset or not cfg.real_base_asset:
@@ -375,23 +397,43 @@ def validate_config(cfg: Config) -> None:
             raise ValueError("REAL_MIN_ORDER_USD cannot exceed REAL_MAX_ORDER_USD")
     if cfg.coinbase_timeout <= 0:
         raise ValueError("COINBASE_TIMEOUT must be positive")
+    if cfg.sol_reserved_for_gas < 0:
+        raise ValueError("SOL_RESERVED_FOR_GAS cannot be negative")
+    if cfg.solana_rpc_timeout <= 0:
+        raise ValueError("SOLANA_RPC_TIMEOUT must be positive")
+    if cfg.solana_confirm_polls <= 0:
+        raise ValueError("SOLANA_CONFIRM_POLLS must be positive")
+    if cfg.solana_confirm_delay_seconds < 0:
+        raise ValueError("SOLANA_CONFIRM_DELAY_SECONDS cannot be negative")
+    if cfg.jupiter_slippage_bps < 0:
+        raise ValueError("JUPITER_SLIPPAGE_BPS cannot be negative")
+    if cfg.jupiter_timeout <= 0:
+        raise ValueError("JUPITER_TIMEOUT must be positive")
     if cfg.real_order_status_polls < 0:
         raise ValueError("REAL_ORDER_STATUS_POLLS cannot be negative")
     if cfg.real_order_status_delay_seconds < 0:
         raise ValueError("REAL_ORDER_STATUS_DELAY_SECONDS cannot be negative")
     if cfg.execution_mode == "coinbase_live" or cfg.real_trading_enabled:
-        if cfg.execution_mode != "coinbase_live":
-            raise ValueError("REAL_TRADING_ENABLED=true requires EXECUTION_MODE=coinbase_live")
+        if cfg.execution_mode not in {"coinbase_live", "solana_jupiter_live"}:
+            raise ValueError("REAL_TRADING_ENABLED=true requires EXECUTION_MODE=coinbase_live or solana_jupiter_live")
         if cfg.symbol != "SOLUSDT":
-            raise ValueError("Coinbase real trading v1 only supports SYMBOL=SOLUSDT")
-        product_parts = cfg.coinbase_product_id.split("-")
-        if len(product_parts) != 2:
-            raise ValueError("COINBASE_PRODUCT_ID must look like BASE-QUOTE, e.g. SOL-USD")
-        if cfg.real_portfolio_mode == "account_balances":
-            if cfg.real_base_asset != "SOL" or cfg.real_cash_asset != "USD" or cfg.coinbase_product_id != "SOL-USD":
-                raise ValueError("Account-balance real trading v1 requires REAL_BASE_ASSET=SOL, REAL_CASH_ASSET=USD, COINBASE_PRODUCT_ID=SOL-USD")
-        elif product_parts[0] != cfg.real_base_asset or product_parts[1] != cfg.real_cash_asset:
-            raise ValueError("COINBASE_PRODUCT_ID must match REAL_BASE_ASSET-REAL_CASH_ASSET")
+            raise ValueError("Real trading v1 only supports SYMBOL=SOLUSDT")
+        if cfg.execution_mode == "coinbase_live":
+            product_parts = cfg.coinbase_product_id.split("-")
+            if len(product_parts) != 2:
+                raise ValueError("COINBASE_PRODUCT_ID must look like BASE-QUOTE, e.g. SOL-USD")
+            if cfg.real_portfolio_mode == "account_balances":
+                if cfg.real_base_asset != "SOL" or cfg.real_cash_asset != "USD" or cfg.coinbase_product_id != "SOL-USD":
+                    raise ValueError("Account-balance Coinbase trading requires REAL_BASE_ASSET=SOL, REAL_CASH_ASSET=USD, COINBASE_PRODUCT_ID=SOL-USD")
+            elif product_parts[0] != cfg.real_base_asset or product_parts[1] != cfg.real_cash_asset:
+                raise ValueError("COINBASE_PRODUCT_ID must match REAL_BASE_ASSET-REAL_CASH_ASSET")
+        if cfg.execution_mode == "solana_jupiter_live":
+            if cfg.real_base_asset != "SOL" or cfg.real_cash_asset != "USDC" or cfg.jupiter_product_id != "SOL-USDC":
+                raise ValueError("Jupiter real trading v1 requires REAL_BASE_ASSET=SOL, REAL_CASH_ASSET=USDC, JUPITER_PRODUCT_ID=SOL-USDC")
+            if not cfg.solana_rpc_url:
+                raise ValueError("SOLANA_RPC_URL is required for solana_jupiter_live")
+            if not cfg.solana_keypair_path:
+                raise ValueError("SOLANA_KEYPAIR_PATH is required for solana_jupiter_live")
         if cfg.trade_mode != "long_only":
             raise ValueError("Real trading v1 requires TRADE_MODE=long_only")
         if cfg.borrow_fee != 0.0:
@@ -404,7 +446,7 @@ def validate_config(cfg: Config) -> None:
             raise ValueError("Real trading v1 requires REAL_REQUIRE_MANUAL_ARM=true")
         if cfg.real_quick_arm_enabled and not cfg.real_arm_token:
             raise ValueError("REAL_QUICK_ARM_ENABLED=true requires REAL_ARM_TOKEN")
-        if not cfg.coinbase_api_key or not cfg.coinbase_api_secret:
+        if cfg.execution_mode == "coinbase_live" and (not cfg.coinbase_api_key or not cfg.coinbase_api_secret):
             raise ValueError("Coinbase real trading requires COINBASE_API_KEY and COINBASE_API_SECRET")
         if cfg.real_trading_enabled and not cfg.real_arm_token:
             raise ValueError("REAL_TRADING_ENABLED=true requires REAL_ARM_TOKEN")

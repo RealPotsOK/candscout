@@ -398,8 +398,8 @@ def prepare_torch_runtime_env(env: dict[str, str]) -> None:
     ]:
         path.mkdir(parents=True, exist_ok=True)
     env.setdefault("HOME", str(state_dir))
-    env.setdefault("USER", "cryptopred")
-    env.setdefault("LOGNAME", "cryptopred")
+    env.setdefault("USER", "candscout")
+    env.setdefault("LOGNAME", "candscout")
     env.setdefault("XDG_CACHE_HOME", str(cache_dir))
     env.setdefault("TORCH_HOME", str(cache_dir / "torch"))
     env.setdefault("TORCHINDUCTOR_CACHE_DIR", str(cache_dir / "torchinductor"))

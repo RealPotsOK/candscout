@@ -235,6 +235,39 @@ def missing_binance_ranges(existing: pd.DataFrame, start_ms: int, end_ms: int, s
     return ranges
 
 
+def cache_matches_interval(frame: pd.DataFrame, step_ms: int) -> bool:
+    """Return False when a cache clearly belongs to another candle interval.
+
+    A wrong-interval cache is worse than no cache. For example, using 15m rows
+    for a 5m request makes every two missing 5m candles appear as a tiny gap,
+    causing thousands of one-request downloads. Correct Binance caches should
+    have most neighboring open_time_ms differences equal to the requested step.
+    Larger differences are allowed only as occasional real gaps.
+    """
+    if frame.empty or len(frame) < 3:
+        return True
+
+    normalized = normalize_cached_frame(frame)
+    diffs = normalized["open_time_ms"].astype("int64").diff().dropna()
+    diffs = diffs[diffs > 0]
+    if diffs.empty:
+        return True
+
+    # If the median spacing is wrong and very few rows use the requested step,
+    # this is almost certainly a cache from another interval.
+    exact_ratio = float((diffs == step_ms).mean())
+    median_diff = int(diffs.median())
+    if median_diff != step_ms and exact_ratio < 0.50:
+        return False
+
+    # If every spacing is an exact larger multiple of the requested interval,
+    # e.g. 15m rows inside a 5m cache path, reject it explicitly.
+    if exact_ratio == 0.0 and bool(((diffs % step_ms) == 0).all()):
+        return False
+
+    return True
+
+
 def default_cache_path(source: str, symbol: str, interval: str, output_path: Path) -> Path:
     if output_path.name:
         return output_path.with_name("cache.parquet")
@@ -260,6 +293,21 @@ def fetch_binance_with_cache(
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     step_ms = interval_to_minutes(interval) * 60_000
     cache = load_seed_cache(cache_path, output_path)
+    if not cache_matches_interval(cache, step_ms):
+        inferred = "unknown"
+        try:
+            diffs = normalize_cached_frame(cache)["open_time_ms"].astype("int64").diff().dropna()
+            diffs = diffs[diffs > 0]
+            if not diffs.empty:
+                inferred = f"{int(diffs.median() // 60_000)}m"
+        except Exception:  # noqa: BLE001 - diagnostic only; ignore bad cache below.
+            inferred = "unknown"
+        print(
+            f"Ignoring Binance cache with mismatched interval at {cache_path} "
+            f"(expected {interval}, inferred about {inferred}).",
+            file=sys.stderr,
+        )
+        cache = pd.DataFrame()
     requested_cached = filter_by_open_time_ms(cache, start_ms, end_ms)
     missing_ranges = missing_binance_ranges(requested_cached, start_ms, end_ms, step_ms)
 

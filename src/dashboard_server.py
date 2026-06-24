@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local CryptoPred dashboard with report serving, job control, and live-sim integration."""
+"""Local CandScout dashboard with report serving, job control, and live-sim integration."""
 
 from __future__ import annotations
 
@@ -407,7 +407,7 @@ class DashboardContext:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the CryptoPred local dashboard")
+    parser = argparse.ArgumentParser(description="Run the CandScout local dashboard")
     parser.add_argument("--host", default="192.168.2.197")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reports-root", default="data/reports")
@@ -1487,7 +1487,7 @@ def extract_report_payload(
 
 def make_handler(ctx: DashboardContext) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CryptoPredDashboard/1.0"
+        server_version = "CandScoutDashboard/1.0"
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -1496,7 +1496,7 @@ def make_handler(ctx: DashboardContext) -> type[BaseHTTPRequestHandler]:
             try:
                 if path in {"/", "/index.html", "/models", "/compare", "/reports", "/live"}:
                     self.send_html(DASHBOARD_HTML)
-                elif path == "/assets/cryptopred.css":
+                elif path == "/assets/candscout.css":
                     self.send_asset(REPORT_STYLE_PATH, "text/css; charset=utf-8")
                 elif path == "/api/dashboard/status":
                     self.send_json({"ok": True, "host": ctx.host, "port": ctx.port})
@@ -1658,8 +1658,8 @@ DASHBOARD_HTML = r'''<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CryptoPred Dashboard</title>
-  <link rel="stylesheet" href="/assets/cryptopred.css">
+  <title>CandScout Dashboard</title>
+  <link rel="stylesheet" href="/assets/candscout.css">
   <style>
     :root { --bg:#f4efe4; --paper:#fffaf0; --ink:#15120d; --muted:#6b6256; --line:#d8c8ad; --accent:#164f45; --orange:#c77519; --red:#b23834; --blue:#245ea8; --green:#16864e; }
     * { box-sizing:border-box; }
@@ -1748,7 +1748,7 @@ DASHBOARD_HTML = r'''<!doctype html>
 </head>
 <body>
   <header>
-    <div><h1>CryptoPred</h1><div class="muted" id="subhead">local research dashboard</div></div>
+    <div><h1>CandScout</h1><div class="muted" id="subhead">local research dashboard</div></div>
     <nav>
       <a href="/" data-route="/">Home</a>
       <a href="/models" data-route="/models">Models</a>
@@ -1777,7 +1777,7 @@ function pct(x) { return `${Math.round((Number(x)||0)*100)}%`; }
 async function init() {
   const [config, registry, settings] = await Promise.all([api('/api/config'), api('/api/model-registry'), api('/api/settings')]);
   state.config = config; state.registry = registry; state.settings = settings; state.activeModel = state.registry[0]?.id;
-  try { state.sectionOpen = JSON.parse(localStorage.getItem('cryptopred-model-sections') || '{}'); } catch (_) { state.sectionOpen = {}; }
+  try { state.sectionOpen = JSON.parse(localStorage.getItem('candscout-model-sections') || '{}'); } catch (_) { state.sectionOpen = {}; }
   render(); setInterval(pollJobs, 1500); setInterval(refreshLive, 5000);
 }
 function render() { setActiveNav(); const p = location.pathname; if (p === '/models') return renderModels(); if (p === '/compare') return renderCompare(); if (p === '/reports') return renderReports(); if (p === '/live') return renderLive(); return renderHome(); }
@@ -1843,7 +1843,7 @@ function renderModelForm(model) {
   $$('details.settings-section', $('#modelForm')).forEach(details => {
     details.addEventListener('toggle', () => {
       state.sectionOpen[details.dataset.settingsSection] = details.open;
-      localStorage.setItem('cryptopred-model-sections', JSON.stringify(state.sectionOpen));
+      localStorage.setItem('candscout-model-sections', JSON.stringify(state.sectionOpen));
     });
   });
   $$('[data-settings-action]', $('#modelForm')).forEach(button => {
@@ -1853,7 +1853,7 @@ function renderModelForm(model) {
         details.open = open;
         state.sectionOpen[details.dataset.settingsSection] = open;
       });
-      localStorage.setItem('cryptopred-model-sections', JSON.stringify(state.sectionOpen));
+      localStorage.setItem('candscout-model-sections', JSON.stringify(state.sectionOpen));
     };
   });
   $$('[data-action]', $('#modelForm')).forEach(btn => btn.onclick = () => startModelJob(model.id, btn.dataset.action));
@@ -2742,7 +2742,7 @@ async function startLiveAction(action) {
 async function renderLive() {
   const liveUrl = state.config?.live_public_url || '';
   const realUrl = liveUrl ? `${liveUrl.replace(/\/$/, '')}/real` : '';
-  $('#app').innerHTML = `<div class="split"><section class="panel"><h2>Live Control Center</h2><p class="muted">Port 8080 has two separate views: <strong>paper live simulation</strong> at / and <strong>real Coinbase spot trading</strong> at /real. A row saying skip/insufficient cash in the paper decision table is not a Coinbase order.</p><div id="liveStatus" class="grid"></div><div class="actions"><button class="primary" data-live="start">Start Live Sim</button><button data-live="sync">Switch Model Env</button><button class="danger" data-live="stop">Stop Live Sim</button><button data-live="update_model">Update Model</button><button id="saveLiveSettingsBtn">Save Page Settings</button><button id="liveLogsBtn">Logs</button><a class="button" href="${esc(liveUrl)}" target="_blank">Open Paper Dashboard</a><a class="button" href="${esc(realUrl)}" target="_blank">Open Real Coinbase Page</a></div><p class="muted" id="liveSettingsStatus">Live settings save to ${esc(state.settings?.path || 'data/reports/dashboard_settings.json')}.</p>${liveFormHtml()}<div class="progress"><span id="jobBar"></span></div><p class="muted" id="jobStatus">No live action running.</p><details id="jobLogDetails" open><summary id="jobLogSummary">Terminal logs</summary><pre id="jobLog"></pre></details><pre id="liveLogs"></pre></section><section class="panel"><h2>Embedded Paper Live Dashboard</h2><p class="muted">This iframe shows paper simulation decisions/trades. For real Coinbase balances/orders, use the Real Coinbase page.</p><iframe id="liveFrame" src="${esc(liveUrl)}"></iframe></section></div>`;
+  $('#app').innerHTML = `<div class="split"><section class="panel"><h2>Live Control Center</h2><p class="muted">Port 8080 has two separate views: <strong>paper live simulation</strong> at / and <strong>real spot trading</strong> at /real. A row saying skip/insufficient cash in the paper decision table is not a real order.</p><div id="liveStatus" class="grid"></div><div class="actions"><button class="primary" data-live="start">Start Live Sim</button><button data-live="sync">Switch Model Env</button><button class="danger" data-live="stop">Stop Live Sim</button><button data-live="update_model">Update Model</button><button id="saveLiveSettingsBtn">Save Page Settings</button><button id="liveLogsBtn">Logs</button><a class="button" href="${esc(liveUrl)}" target="_blank">Open Paper Dashboard</a><a class="button" href="${esc(realUrl)}" target="_blank">Open Real Trading Page</a></div><p class="muted" id="liveSettingsStatus">Live settings save to ${esc(state.settings?.path || 'data/reports/dashboard_settings.json')}.</p>${liveFormHtml()}<div class="progress"><span id="jobBar"></span></div><p class="muted" id="jobStatus">No live action running.</p><details id="jobLogDetails" open><summary id="jobLogSummary">Terminal logs</summary><pre id="jobLog"></pre></details><pre id="liveLogs"></pre></section><section class="panel"><h2>Embedded Paper Live Dashboard</h2><p class="muted">This iframe shows paper simulation decisions/trades. For real balances/orders, use the Real Trading page.</p><iframe id="liveFrame" src="${esc(liveUrl)}"></iframe></section></div>`;
   $$('[data-live]').forEach(btn => btn.onclick = async () => startLiveAction(btn.dataset.live));
   $('#saveLiveSettingsBtn').onclick = async () => saveLiveSettings(true);
   $$('input,select', $('#liveConfigForm')).forEach(el => {
@@ -2760,7 +2760,7 @@ async function refreshLive() {
     const s = await api('/api/live/status');
     const account = s.account || {}; const cfg = s.config || {}; const dec = s.latest_decision || {}; const ticker = s.latest_ticker || {}; const real = s.real_trading || {};
     $('#liveStatus').innerHTML = [
-      ['Docker Status', s.running === false ? 'not running' : (s.status || 'unknown')], ['Symbol', cfg.symbol || ''], ['Interval', cfg.interval || ''], ['Train Model', cfg.train_model_type || ''], ['Retrain Every', cfg.retrain_frequency || ''], ['Paper Equity', account.equity ?? account.account_value ?? ''], ['Paper Cash', account.cash ?? ''], ['Paper Position', s.position ? 'open' : 'none'], ['Latest Paper Action', dec.action ? `${dec.action}: ${dec.reason || ''}` : ''], ['Model Prob Up', dec.prob_up ?? ''], ['Bid / Ask', `${ticker.bid_price ?? ticker.bid ?? ''} / ${ticker.ask_price ?? ticker.ask ?? ''}`], ['Real Coinbase', real.armed ? 'ARMED' : (real.enabled ? 'enabled, disarmed' : 'disabled')]
+      ['Docker Status', s.running === false ? 'not running' : (s.status || 'unknown')], ['Symbol', cfg.symbol || ''], ['Interval', cfg.interval || ''], ['Train Model', cfg.train_model_type || ''], ['Retrain Every', cfg.retrain_frequency || ''], ['Paper Equity', account.equity ?? account.account_value ?? ''], ['Paper Cash', account.cash ?? ''], ['Paper Position', s.position ? 'open' : 'none'], ['Latest Paper Action', dec.action ? `${dec.action}: ${dec.reason || ''}` : ''], ['Model Prob Up', dec.prob_up ?? ''], ['Bid / Ask', `${ticker.bid_price ?? ticker.bid ?? ''} / ${ticker.ask_price ?? ticker.ask ?? ''}`], ['Real Backend', `${real.execution_source || cfg.execution_mode || 'paper'}: ${real.armed ? 'ARMED' : (real.enabled ? 'enabled, disarmed' : 'disabled')}`]
     ].map(([k,v]) => `<div class="card"><h3>${esc(k)}</h3><p class="muted ${String(v).includes('not running')?'status-bad':'status-ok'}">${esc(v)}</p></div>`).join('');
   } catch (e) { $('#liveStatus').innerHTML = `<div class="card"><h3>Status</h3><p class="muted status-bad">${esc(e.message)}</p></div>`; }
 }
@@ -3271,7 +3271,7 @@ def main() -> None:
             f"Could not bind dashboard to {args.host}:{args.port}: {exc}. "
             "Another server is probably already using the port. Run `make stop`, or change REPORTS_PORT."
         ) from exc
-    print(f"CryptoPred dashboard: http://{args.host}:{args.port}/", flush=True)
+    print(f"CandScout dashboard: http://{args.host}:{args.port}/", flush=True)
     print(f"Live sim target: {args.live_public_url}", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)

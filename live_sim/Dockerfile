@@ -7,11 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY live_sim/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install -r /app/requirements.txt
 
 ENV HOME=/app/state \
-    USER=cryptopred \
-    LOGNAME=cryptopred \
+    USER=candscout \
+    LOGNAME=candscout \
     XDG_CACHE_HOME=/app/state/.cache \
     TORCH_HOME=/app/state/.cache/torch \
     TORCHINDUCTOR_CACHE_DIR=/app/state/.cache/torchinductor \

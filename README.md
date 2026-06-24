@@ -1,6 +1,6 @@
-# cryptopred
+# candscout
 
-`cryptopred` is a crypto/stock prediction research project. It downloads candle data, builds features or candle sequences, trains separate model families, backtests them, visualizes predictions, and runs bank-account simulations.
+`candscout` is a crypto/stock prediction research project. It downloads candle data, builds features or candle sequences, trains separate model families, backtests them, visualizes predictions, and runs bank-account simulations.
 
 This is not live trading software. It is an offline research/backtest tool.
 
@@ -332,7 +332,7 @@ make show-current
 
 Generated data, reports, trained models, and `.venv/` are ignored by git. Only source, docs, requirements, workflow files, and Makefile should be committed.
 
-Publish to a private GitHub repo named `cryptopred`:
+Publish to a private GitHub repo named `candscout`:
 
 ```bash
 make github-check

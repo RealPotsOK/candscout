@@ -12,6 +12,7 @@ import pandas as pd
 from app.bot import LivePaperBot
 from app.coinbase_exec import RealOrderResult, RealTradeService
 from app.config import load_config, parse_retrain_frequency
+from app.jupiter_exec import JupiterSolanaExecutor
 from app.market import Candle, synthetic_book_ticker
 from app.model_runner import build_sequence_input
 from app.scheduler import floor_to_interval, live_candle_cache_path, seed_live_candle_cache
@@ -210,6 +211,19 @@ class RealTradingSafetyTest(unittest.TestCase):
         env.update(overrides)
         return env
 
+    def jupiter_env(self, **overrides: str) -> dict[str, str]:
+        env = self.live_env(
+            EXECUTION_MODE="solana_jupiter_live",
+            REAL_CASH_ASSET="USDC",
+            COINBASE_API_KEY="",
+            COINBASE_API_SECRET="",
+            SOLANA_RPC_URL="https://example-rpc.invalid",
+            SOLANA_KEYPAIR_PATH="/app/state/solana-keypair.json",
+            JUPITER_PRODUCT_ID="SOL-USDC",
+        )
+        env.update(overrides)
+        return env
+
     def test_config_rejects_live_cap_above_20(self) -> None:
         with patch.dict(os.environ, self.live_env(REAL_PORTFOLIO_MODE="capped_bot_tracked", REAL_MAX_TOTAL_USD="21"), clear=True):
             with self.assertRaises(ValueError):
@@ -243,6 +257,18 @@ class RealTradingSafetyTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config()
 
+    def test_config_accepts_jupiter_live_without_coinbase_credentials(self) -> None:
+        with patch.dict(os.environ, self.jupiter_env(), clear=True):
+            cfg = load_config()
+            self.assertEqual(cfg.execution_mode, "solana_jupiter_live")
+            self.assertEqual(cfg.real_cash_asset, "USDC")
+            self.assertEqual(cfg.jupiter_product_id, "SOL-USDC")
+
+    def test_config_rejects_jupiter_live_without_rpc(self) -> None:
+        with patch.dict(os.environ, self.jupiter_env(SOLANA_RPC_URL=""), clear=True):
+            with self.assertRaises(ValueError):
+                load_config()
+
     def test_quick_arm_toggle_arms_and_disarms_when_enabled(self) -> None:
         class FakeExecutor:
             def health_check(self) -> dict[str, object]:
@@ -265,7 +291,7 @@ class RealTradingSafetyTest(unittest.TestCase):
             self.assertFalse(bool(store.real_state()["armed"]))
             store.close()
 
-    def test_account_balance_buy_uses_available_usd(self) -> None:
+    def test_account_balance_buy_caps_available_usd_by_max_order(self) -> None:
         class FakeExecutor:
             def __init__(self) -> None:
                 self.buy_quotes: list[float] = []
@@ -306,7 +332,59 @@ class RealTradingSafetyTest(unittest.TestCase):
                 planned_usd=1000.0,
                 reason="test",
             )
-            self.assertEqual(fake.buy_quotes, [100.0])
+            self.assertEqual(fake.buy_quotes, [5.0])
+            store.close()
+
+    def test_jupiter_account_balance_buy_caps_available_usdc_by_max_order(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.buy_quotes: list[float] = []
+
+            def health_check(self) -> dict[str, object]:
+                return {"ok": True, "execution_source": "jupiter_solana"}
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USDC", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USDC": 100.0, "SOL": 0.0}
+
+            def market_buy_quote(self, quote_usd: float) -> RealOrderResult:
+                self.buy_quotes.append(quote_usd)
+                return RealOrderResult(
+                    status="filled",
+                    product_id="SOL-USDC",
+                    side="BUY",
+                    client_order_id="test-jup-buy",
+                    coinbase_order_id="sig-buy",
+                    requested_usd=quote_usd,
+                    requested_sol=0.0,
+                    filled_usd=quote_usd,
+                    filled_sol=quote_usd / 100.0,
+                    average_price=100.0,
+                    fee_usd=0.0,
+                    raw_response={"signature": "sig-buy"},
+                    execution_source="jupiter_solana",
+                    transaction_signature="sig-buy",
+                )
+
+        with patch.dict(os.environ, self.jupiter_env(REAL_MAX_ORDER_USD="20"), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            fake = FakeExecutor()
+            service = RealTradeService(cfg, store, fake)  # type: ignore[arg-type]
+            service.execute_buy(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                planned_usd=1000.0,
+                reason="test",
+            )
+            self.assertEqual(fake.buy_quotes, [20.0])
+            order = store.latest_real_order()
+            self.assertEqual(order["execution_source"], "jupiter_solana")
+            self.assertEqual(order["transaction_signature"], "sig-buy")
             store.close()
 
     def test_capped_real_buy_never_exceeds_order_or_total_cap(self) -> None:
@@ -414,7 +492,7 @@ class RealTradingSafetyTest(unittest.TestCase):
             self.assertEqual(store.latest_real_order()["status"], "failed")
             store.close()
 
-    def test_account_balance_sell_uses_available_sol(self) -> None:
+    def test_account_balance_sell_caps_available_sol_by_max_order_value(self) -> None:
         class FakeExecutor:
             def __init__(self) -> None:
                 self.sell_calls: list[float] = []
@@ -454,9 +532,69 @@ class RealTradingSafetyTest(unittest.TestCase):
                 candle_open_time="2026-01-01T00:00:00Z",
                 reason="test",
             )
-            self.assertEqual(fake.sell_calls, [1.25])
-            self.assertEqual(store.latest_real_order()["action"], "sell_all_sol")
+            self.assertEqual(fake.sell_calls, [0.05])
+            self.assertEqual(store.latest_real_order()["action"], "sell_capped_sol")
             store.close()
+
+    def test_jupiter_account_balance_sell_caps_available_sol_by_max_order_value(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.sell_calls: list[float] = []
+
+            def product_snapshot(self) -> dict[str, object]:
+                return {"product_id": "SOL-USDC", "price": 100.0}
+
+            def available_balances(self) -> dict[str, float]:
+                return {"USDC": 0.0, "SOL": 1.25}
+
+            def market_sell_base(self, base_sol: float) -> RealOrderResult:
+                self.sell_calls.append(base_sol)
+                return RealOrderResult(
+                    status="filled",
+                    product_id="SOL-USDC",
+                    side="SELL",
+                    client_order_id="test-jup-sell",
+                    coinbase_order_id="sig-sell",
+                    requested_usd=0.0,
+                    requested_sol=base_sol,
+                    filled_usd=base_sol * 100.0,
+                    filled_sol=base_sol,
+                    average_price=100.0,
+                    fee_usd=0.0,
+                    raw_response={"signature": "sig-sell"},
+                    execution_source="jupiter_solana",
+                    transaction_signature="sig-sell",
+                )
+
+        with patch.dict(os.environ, self.jupiter_env(REAL_MAX_ORDER_USD="20"), clear=True), TemporaryDirectory() as tmp:
+            cfg = load_config()
+            store = Store(str(Path(tmp) / "live.db"))
+            store.initialize_account(100.0, "2026-01-01T00:00:00Z")
+            store.set_real_armed(armed=True, ts="2026-01-01T00:00:00Z")
+            fake = FakeExecutor()
+            service = RealTradeService(cfg, store, fake)  # type: ignore[arg-type]
+            service.execute_sell_all(
+                ts="2026-01-01T00:05:00Z",
+                candle_open_time="2026-01-01T00:00:00Z",
+                reason="test",
+            )
+            self.assertEqual(fake.sell_calls, [0.2])
+            order = store.latest_real_order()
+            self.assertEqual(order["execution_source"], "jupiter_solana")
+            self.assertEqual(order["transaction_signature"], "sig-sell")
+            store.close()
+
+    def test_jupiter_balance_keeps_sol_gas_reserve(self) -> None:
+        with patch.dict(os.environ, self.jupiter_env(SOL_RESERVED_FOR_GAS="0.02"), clear=True):
+            cfg = load_config()
+        executor = JupiterSolanaExecutor.__new__(JupiterSolanaExecutor)
+        executor.cfg = cfg
+        executor.public_key = "wallet"
+        executor._rpc = lambda method, params: {"value": 50_000_000} if method == "getBalance" else {"value": []}  # type: ignore[method-assign]
+        executor._token_balance = lambda mint, divisor: 12.5  # type: ignore[method-assign]
+        balances = executor.available_balances()
+        self.assertAlmostEqual(balances["SOL"], 0.03)
+        self.assertAlmostEqual(balances["USDC"], 12.5)
 
     def test_capped_real_sell_uses_only_bot_tracked_sol(self) -> None:
         class FakeExecutor:

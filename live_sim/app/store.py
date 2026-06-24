@@ -158,9 +158,19 @@ class Store:
                     action TEXT NOT NULL,
                     status TEXT NOT NULL,
                     product_id TEXT NOT NULL,
+                    execution_source TEXT NOT NULL DEFAULT 'coinbase',
                     side TEXT NOT NULL,
                     client_order_id TEXT,
                     coinbase_order_id TEXT,
+                    transaction_signature TEXT,
+                    input_mint TEXT,
+                    output_mint TEXT,
+                    input_amount_raw REAL NOT NULL DEFAULT 0,
+                    expected_output_amount_raw REAL NOT NULL DEFAULT 0,
+                    confirmed_output_amount_raw REAL NOT NULL DEFAULT 0,
+                    network_fee_lamports REAL NOT NULL DEFAULT 0,
+                    priority_fee_lamports REAL NOT NULL DEFAULT 0,
+                    slippage_bps REAL NOT NULL DEFAULT 0,
                     requested_usd REAL NOT NULL DEFAULT 0,
                     requested_sol REAL NOT NULL DEFAULT 0,
                     filled_usd REAL NOT NULL DEFAULT 0,
@@ -193,6 +203,16 @@ class Store:
             self._ensure_column("open_position", "side", "TEXT NOT NULL DEFAULT 'long'")
             self._ensure_column("trades", "side", "TEXT NOT NULL DEFAULT 'long'")
             self._ensure_column("trades", "borrow_fee", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "execution_source", "TEXT NOT NULL DEFAULT 'coinbase'")
+            self._ensure_column("real_orders", "transaction_signature", "TEXT")
+            self._ensure_column("real_orders", "input_mint", "TEXT")
+            self._ensure_column("real_orders", "output_mint", "TEXT")
+            self._ensure_column("real_orders", "input_amount_raw", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "expected_output_amount_raw", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "confirmed_output_amount_raw", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "network_fee_lamports", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "priority_fee_lamports", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column("real_orders", "slippage_bps", "REAL NOT NULL DEFAULT 0")
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO real_trade_state (
@@ -475,10 +495,13 @@ class Store:
             self.conn.execute(
                 """
                 INSERT INTO real_orders (
-                    ts, candle_open_time, action, status, product_id, side,
-                    client_order_id, coinbase_order_id, requested_usd, requested_sol,
+                    ts, candle_open_time, action, status, product_id, execution_source, side,
+                    client_order_id, coinbase_order_id, transaction_signature,
+                    input_mint, output_mint, input_amount_raw, expected_output_amount_raw,
+                    confirmed_output_amount_raw, network_fee_lamports, priority_fee_lamports,
+                    slippage_bps, requested_usd, requested_sol,
                     filled_usd, filled_sol, average_price, fee_usd, reason, error, raw_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order["ts"],
@@ -486,9 +509,19 @@ class Store:
                     order["action"],
                     order["status"],
                     order["product_id"],
+                    order.get("execution_source", "coinbase"),
                     order["side"],
                     order.get("client_order_id"),
                     order.get("coinbase_order_id"),
+                    order.get("transaction_signature"),
+                    order.get("input_mint"),
+                    order.get("output_mint"),
+                    order.get("input_amount_raw", 0.0),
+                    order.get("expected_output_amount_raw", 0.0),
+                    order.get("confirmed_output_amount_raw", 0.0),
+                    order.get("network_fee_lamports", 0.0),
+                    order.get("priority_fee_lamports", 0.0),
+                    order.get("slippage_bps", 0.0),
                     order.get("requested_usd", 0.0),
                     order.get("requested_sol", 0.0),
                     order.get("filled_usd", 0.0),
@@ -504,8 +537,16 @@ class Store:
     def latest_real_order(self) -> dict[str, Any] | None:
         return self.latest_row("real_orders")
 
-    def recent_real_orders(self, limit: int = 100) -> list[dict[str, Any]]:
-        return self.recent_rows("real_orders", limit)
+    def recent_real_orders(self, limit: int = 100, source: str | None = None) -> list[dict[str, Any]]:
+        if not source:
+            return self.recent_rows("real_orders", limit)
+        safe_limit = max(1, min(int(limit), 5000))
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM real_orders WHERE execution_source = ? ORDER BY id DESC LIMIT ?",
+                (source, safe_limit),
+            ).fetchall()
+            return [dict(row) for row in reversed(rows)]
 
     def insert_real_account_snapshot(self, snapshot: dict[str, Any]) -> None:
         with self.lock, self.conn:
@@ -534,11 +575,26 @@ class Store:
                 ),
             )
 
-    def recent_real_account_snapshots(self, limit: int = 1000) -> list[dict[str, Any]]:
-        return self.recent_rows("real_account_snapshots", limit)
+    def recent_real_account_snapshots(self, limit: int = 1000, source: str | None = None) -> list[dict[str, Any]]:
+        if not source:
+            return self.recent_rows("real_account_snapshots", limit)
+        safe_limit = max(1, min(int(limit), 5000))
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM real_account_snapshots WHERE source = ? ORDER BY id DESC LIMIT ?",
+                (source, safe_limit),
+            ).fetchall()
+            return [dict(row) for row in reversed(rows)]
 
-    def latest_real_account_snapshot(self) -> dict[str, Any] | None:
-        return self.latest_row("real_account_snapshots")
+    def latest_real_account_snapshot(self, source: str | None = None) -> dict[str, Any] | None:
+        if not source:
+            return self.latest_row("real_account_snapshots")
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM real_account_snapshots WHERE source = ? ORDER BY id DESC LIMIT 1",
+                (source,),
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def insert_training_run(
         self,

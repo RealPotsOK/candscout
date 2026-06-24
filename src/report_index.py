@@ -11,7 +11,7 @@ from pathlib import Path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate data/reports index.html")
     parser.add_argument("--output", default="data/reports/index.html", help="Index HTML output path")
-    parser.add_argument("--title", default="cryptopred reports", help="Index page title")
+    parser.add_argument("--title", default="candscout reports", help="Index page title")
     parser.add_argument("--model-url", required=True, help="Model visualization URL path")
     parser.add_argument("--sim-url", required=True, help="Simulation visualization URL path")
     parser.add_argument("--lr-model-url", default="", help="Optional LR model visualization URL path")
@@ -110,7 +110,7 @@ def build_html(args: argparse.Namespace) -> str:
       line-height: 1.35;
     }}
   </style>
-  <link rel="stylesheet" href="/assets/cryptopred.css">
+  <link rel="stylesheet" href="/assets/candscout.css">
 </head>
 <body>
   <header>

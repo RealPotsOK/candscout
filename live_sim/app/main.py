@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from .bot import LivePaperBot, now_iso
-from .coinbase_exec import CoinbaseSpotExecutor, RealTradeService
+from .coinbase_exec import RealTradeService
 from .config import load_config
 from .market import BinanceClient
 from .model_runner import LiveModel
@@ -25,8 +25,8 @@ def prepare_runtime_env() -> None:
     ]:
         os.makedirs(path, exist_ok=True)
     os.environ.setdefault("HOME", state_dir)
-    os.environ.setdefault("USER", "cryptopred")
-    os.environ.setdefault("LOGNAME", "cryptopred")
+    os.environ.setdefault("USER", "candscout")
+    os.environ.setdefault("LOGNAME", "candscout")
     os.environ.setdefault("XDG_CACHE_HOME", cache_dir)
     os.environ.setdefault("TORCH_HOME", f"{cache_dir}/torch")
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", f"{cache_dir}/torchinductor")
@@ -47,8 +47,7 @@ def main() -> None:
 
     model = LiveModel(cfg.model_path)
     market = BinanceClient(cfg.binance_base_url)
-    real_executor = CoinbaseSpotExecutor(cfg) if cfg.execution_mode == "coinbase_live" else None
-    real_trader = RealTradeService(cfg, store, real_executor)
+    real_trader = RealTradeService(cfg, store, None)
     bot = LivePaperBot(cfg, store, market, model, real_trader)
     retrain_scheduler = RetrainScheduler(cfg, store)
     store.insert_event(now, "info", f"server start symbol={cfg.symbol} interval={cfg.interval}")

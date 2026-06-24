@@ -1,4 +1,5 @@
 SHELL := /bin/bash
+.EXPORT_ALL_VARIABLES:
 
 # ---------- Environment defaults ----------
 # Bootstrap runtime/local first so they can select ASSET_ENV and TRAINER_ENV.
@@ -86,89 +87,7 @@ STOCK_ARCHIVE_CURRENT ?= 1
 STOCK_ASSET_ENV ?= $(if $(filter 1d,$(STOCK_INTERVAL)),env/assets/stock_yahoo_1d.env,$(if $(filter 1h,$(STOCK_INTERVAL)),env/assets/stock_yahoo_1h.env,$(ASSET_ENV)))
 
 run-stock stock-run:
-	@STOCK_END_RESOLVED="$(STOCK_END)"; \
-	STOCK_START_RESOLVED="$(STOCK_START)"; \
-	if [ -z "$${STOCK_START_RESOLVED}" ]; then \
-		STOCK_START_RESOLVED="$$(STOCK_END="$${STOCK_END_RESOLVED}" STOCK_LOOKBACK_DAYS="$(STOCK_LOOKBACK_DAYS)" $(PYTHON) -c 'from datetime import datetime, timezone, timedelta; import os; raw=os.environ["STOCK_END"]; raw=raw[:-1]+"+00:00" if raw.endswith("Z") else raw; end=datetime.fromisoformat(raw); end=end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end.astimezone(timezone.utc); start=end-timedelta(days=int(os.environ["STOCK_LOOKBACK_DAYS"])); print(start.isoformat().replace("+00:00","Z"))')"; \
-	fi; \
-	STOCK_SYMBOL="$$( \
-		$(PYTHON) src/select_stock.py \
-			--symbol "$(STOCK_SYMBOL)" \
-			--stock-list "$(STOCK_LIST)" \
-			--interval "$(STOCK_INTERVAL)" \
-			--start "$${STOCK_START_RESOLVED}" \
-			--end "$${STOCK_END_RESOLVED}" \
-			--min-rows "$(STOCK_MIN_ROWS)" \
-			--min-history-years "$(STOCK_MIN_HISTORY_YEARS)" \
-	)"; \
-	if [ -z "$${STOCK_SYMBOL}" ]; then echo "No eligible stock selected"; exit 1; fi; \
-	RAW_DATA_PATH="data/downloads/yahoo/$${STOCK_SYMBOL}/$(STOCK_INTERVAL)/candles.parquet"; \
-	ARCHIVE_NAME="before-stock-$${STOCK_SYMBOL}-$$(date -u +%Y%m%dT%H%M%SZ)"; \
-	STOCK_ARCHIVE_NAME="stock-$${STOCK_SYMBOL}-$$(date -u +%Y%m%dT%H%M%SZ)"; \
-	echo "Selected stock: $${STOCK_SYMBOL}"; \
-	echo "Stock data source: yahoo"; \
-	echo "Stock interval: $(STOCK_INTERVAL)"; \
-	echo "Stock date range: $${STOCK_START_RESOLVED} to $${STOCK_END_RESOLVED}"; \
-	echo "Stock history filter: >= $(STOCK_MIN_HISTORY_YEARS) years and >= $(STOCK_MIN_ROWS) rows"; \
-	echo "Stock split: $(STOCK_SPLIT) train, final $(STOCK_SIM_TEST_FRACTION) simulation fraction"; \
-	if [ "$(STOCK_ARCHIVE_CURRENT)" != "0" ]; then \
-		echo "Archiving current NN model/config before stock run: $${ARCHIVE_NAME}"; \
-		$(MAKE) nn-save NN_ARCHIVE_NAME="$${ARCHIVE_NAME}"; \
-	fi; \
-	$(MAKE) download \
-		DATA_SOURCE=yahoo \
-		SYMBOL="$${STOCK_SYMBOL}" \
-		RANDOM_STOCK=0 \
-		INTERVAL="$(STOCK_INTERVAL)" \
-		START="$${STOCK_START_RESOLVED}" \
-		END="$${STOCK_END_RESOLVED}"; \
-	$(PYTHON) -c 'import sys, pandas as pd; p=sys.argv[1]; m=int(sys.argv[2]); df=pd.read_parquet(p); t=pd.to_datetime(df["open_time"], utc=True); n=len(df); print(f"Stock downloaded rows: {n}"); print(f"Stock downloaded range: {t.min()} to {t.max()}"); sys.exit(f"Only {n} rows downloaded; expected at least {m}. Increase STOCK_LOOKBACK_DAYS or check the Yahoo range.") if n < m else None' "$${RAW_DATA_PATH}" "$(STOCK_MIN_ROWS)"; \
-	$(MAKE) experiment visualize nn-sim nn-sim-visualize reports-index \
-		ASSET_ENV="$(STOCK_ASSET_ENV)" \
-		DATA_SOURCE=yahoo \
-		SYMBOL="$${STOCK_SYMBOL}" \
-		RANDOM_STOCK=0 \
-		INTERVAL="$(STOCK_INTERVAL)" \
-		START="$${STOCK_START_RESOLVED}" \
-		END="$${STOCK_END_RESOLVED}" \
-		SPLIT="$(STOCK_SPLIT)" \
-		SIM_DEFAULT_TEST_FRACTION="$(STOCK_SIM_TEST_FRACTION)"; \
-	echo "Archiving stock NN model/config: $${STOCK_ARCHIVE_NAME}"; \
-	$(MAKE) nn-save \
-		ASSET_ENV="$(STOCK_ASSET_ENV)" \
-		DATA_SOURCE=yahoo \
-		SYMBOL="$${STOCK_SYMBOL}" \
-		RANDOM_STOCK=0 \
-		INTERVAL="$(STOCK_INTERVAL)" \
-		START="$${STOCK_START_RESOLVED}" \
-		END="$${STOCK_END_RESOLVED}" \
-		SPLIT="$(STOCK_SPLIT)" \
-		SIM_DEFAULT_TEST_FRACTION="$(STOCK_SIM_TEST_FRACTION)" \
-		NN_ARCHIVE_NAME="$${STOCK_ARCHIVE_NAME}"; \
-	echo "Open model visualization on your other laptop:"; \
-	echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/nn/$(NN_MODEL_TYPE)/yahoo/$${STOCK_SYMBOL}/$(STOCK_INTERVAL)/visualization.html"; \
-	echo "Open simulation visualization on your other laptop:"; \
-	echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/sim/nn/$(NN_MODEL_TYPE)/yahoo/$${STOCK_SYMBOL}/$(STOCK_INTERVAL)/visualization.html"; \
-	echo "Report index:"; \
-	echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"; \
-	if curl -fsS --max-time 2 "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)" >/dev/null 2>&1; then \
-		echo "Reports server is running on $(REPORTS_HOST):$(REPORTS_PORT)."; \
-	else \
-		echo "Starting dashboard server in the background on $(REPORTS_HOST):$(REPORTS_PORT)."; \
-		mkdir -p data/reports; \
-		setsid $(PYTHON) src/dashboard_server.py \
-			--host $(REPORTS_HOST) \
-			--port $(REPORTS_PORT) \
-			--reports-root data/reports \
-			--root . \
-			--live-url $(LIVE_LOCAL_URL) \
-			--live-public-url $(LIVE_PUBLIC_URL) \
-			> data/reports/dashboard_server.log 2>&1 < /dev/null & \
-		sleep 1; \
-		curl -fsS --max-time 3 "http://$(REPORTS_HOST):$(REPORTS_PORT)/api/dashboard/status" >/dev/null \
-			&& echo "Dashboard server started." \
-			|| { echo "Dashboard server did not respond. Check data/reports/dashboard_server.log"; exit 1; }; \
-	fi
+	@scripts/run_stock.sh
 
 help:
 	@echo "Targets:"
@@ -310,45 +229,22 @@ repo-status:
 	@printf '%s\n' Makefile requirements.txt README.md .gitignore
 
 github-check:
-	@command -v git >/dev/null 2>&1 || { echo "Missing git. Install git, then rerun make github-publish."; exit 1; }
-	@command -v gh >/dev/null 2>&1 || { echo "Missing GitHub CLI 'gh'. Install gh, run 'gh auth login', then rerun make github-publish."; exit 1; }
-	@gh auth status >/dev/null 2>&1 || { echo "GitHub CLI is not authenticated. Run 'gh auth login', then rerun make github-publish."; exit 1; }
-	@echo "GitHub CLI is installed and authenticated."
+	@scripts/github.sh check
 
 github-init:
-	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
-		echo "Already inside a git repository."; \
-	else \
-		git init -b main; \
-	fi
-	@git branch -M main
+	@scripts/github.sh init
 
 github-commit: github-init
-	@git var GIT_AUTHOR_IDENT >/dev/null 2>&1 || { echo "Missing git author identity. Run: git config --global user.name 'Your Name' && git config --global user.email 'you@example.com'"; exit 1; }
-	@git add .gitignore .github/workflows/smoke.yml README.md docs/project_structure.md Makefile requirements.txt env src
-	@if git diff --cached --quiet; then \
-		echo "No source/config/docs changes staged for commit."; \
-	else \
-		git commit -m "$(COMMIT_MSG)"; \
-	fi
+	@scripts/github.sh commit
 
 github-create-private: github-check github-init
-	@if git remote get-url origin >/dev/null 2>&1; then \
-		echo "origin already exists: $$(git remote get-url origin)"; \
-	else \
-		gh repo create $(GITHUB_REPO) --private --source=. --remote=origin; \
-	fi
+	@scripts/github.sh create-private
 
 github-push: github-check github-init
-	@git remote get-url origin >/dev/null 2>&1 || { echo "Missing origin remote. Run make github-create-private first."; exit 1; }
-	git push -u origin main
+	@scripts/github.sh push
 
 github-publish:
-	$(MAKE) github-check
-	$(MAKE) github-init
-	$(MAKE) github-commit
-	$(MAKE) github-create-private
-	$(MAKE) github-push
+	@scripts/github.sh publish
 
 download: dirs
 	$(PYTHON) src/download.py \
@@ -493,130 +389,10 @@ nn-diagnostic:
 	@echo "Predictions:   $(NN_PREDICTIONS_OUT)"
 
 save-run: dirs
-	$(PYTHON) src/archive_model.py \
-		--run-store $(RUNS_ROOT) \
-		--current-root $(CURRENT_ROOT) \
-		--write-current \
-		--family nn \
-		--model-type $(NN_MODEL_TYPE) \
-		--backend $(NN_BACKEND) \
-		--asset-env $(ASSET_ENV) \
-		--trainer-env $(TRAINER_ENV) \
-		--model $(NN_MODEL_OUT) \
-		--train-metrics $(NN_TRAIN_METRICS) \
-		--backtest-report $(NN_BACKTEST_REPORT) \
-		--predictions $(NN_PREDICTIONS_OUT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--param ASSET_ENV="$(ASSET_ENV)" \
-		--param TRAINER_ENV="$(TRAINER_ENV)" \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param SIM_STARTING_CASH="$(SIM_STARTING_CASH)" \
-		--param SIM_MIN_INVEST="$(SIM_MIN_INVEST)" \
-		--param SIM_MAX_INVEST="$(SIM_MAX_INVEST)" \
-		--param SIM_CONFIDENCE_MULTIPLIER="$(SIM_CONFIDENCE_MULTIPLIER)" \
-		--param SIM_POSITION_MODE="$(SIM_POSITION_MODE)" \
-		--param SIM_SLIPPAGE="$(SIM_SLIPPAGE)" \
-		--param SIM_SPREAD_PCT="$(SIM_SPREAD_PCT)" \
-		--param POSITION_MODE="$(POSITION_MODE)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param NN_BACKEND="$(NN_BACKEND)" \
-		--param NN_DEVICE="$(NN_DEVICE)" \
-		--param NN_MODEL_TYPE="$(NN_MODEL_TYPE)" \
-		--param NN_LOOKBACK="$(NN_LOOKBACK)" \
-		--param NN_SEQUENCE_FEATURE_SET="$(NN_SEQUENCE_FEATURE_SET)" \
-		--param NN_CNN_FILTERS="$(NN_CNN_FILTERS)" \
-		--param NN_CNN_KERNEL_SIZES="$(NN_CNN_KERNEL_SIZES)" \
-		--param NN_LSTM_HIDDEN_SIZE="$(NN_LSTM_HIDDEN_SIZE)" \
-		--param NN_LSTM_LAYERS="$(NN_LSTM_LAYERS)" \
-		--param NN_LSTM_DROPOUT="$(NN_LSTM_DROPOUT)" \
-		--param NN_GRU_HIDDEN_SIZE="$(NN_GRU_HIDDEN_SIZE)" \
-		--param NN_GRU_LAYERS="$(NN_GRU_LAYERS)" \
-		--param NN_GRU_DROPOUT="$(NN_GRU_DROPOUT)" \
-		--param NN_TRANSFORMER_D_MODEL="$(NN_TRANSFORMER_D_MODEL)" \
-		--param NN_TRANSFORMER_HEADS="$(NN_TRANSFORMER_HEADS)" \
-		--param NN_TRANSFORMER_LAYERS="$(NN_TRANSFORMER_LAYERS)" \
-		--param NN_TRANSFORMER_FF_DIM="$(NN_TRANSFORMER_FF_DIM)" \
-		--param NN_TRANSFORMER_DROPOUT="$(NN_TRANSFORMER_DROPOUT)" \
-		--param NN_HIDDEN_LAYERS="$(NN_HIDDEN_LAYERS)" \
-		--param NN_LR="$(NN_LR)" \
-		--param NN_EPOCHS="$(NN_EPOCHS)" \
-		--param NN_BATCH_SIZE="$(NN_BATCH_SIZE)" \
-		--param NN_L2="$(NN_L2)" \
-		--param NN_CLASS_WEIGHT_MODE="$(NN_CLASS_WEIGHT_MODE)" \
-		--param NN_SEED="$(NN_SEED)" \
-		--param DECISION_THRESHOLD="$(DECISION_THRESHOLD)" \
-		--param THRESHOLD_GRID="$(THRESHOLD_GRID)" \
-		--param OPTIMIZE_METRIC="$(OPTIMIZE_METRIC)" \
-		--param RAW_DATA="$(RAW_DATA)" \
-		--param NN_MODEL_OUT="$(NN_MODEL_OUT)" \
-		--param NN_TRAIN_METRICS="$(NN_TRAIN_METRICS)" \
-		--param NN_BACKTEST_REPORT="$(NN_BACKTEST_REPORT)" \
-		--param NN_PREDICTIONS_OUT="$(NN_PREDICTIONS_OUT)"
+	@scripts/archive_run.sh nn
 
 lr-save-run: dirs
-	$(PYTHON) src/archive_model.py \
-		--run-store $(RUNS_ROOT) \
-		--current-root $(CURRENT_ROOT) \
-		--write-current \
-		--family lr \
-		--model-type logreg \
-		--backend numpy \
-		--asset-env $(ASSET_ENV) \
-		--trainer-env $(LR_TRAINER_ENV) \
-		--model $(MODEL_OUT) \
-		--train-metrics $(TRAIN_METRICS) \
-		--backtest-report $(BACKTEST_REPORT) \
-		--predictions $(PREDICTIONS_OUT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--env-file $(LR_TRAINER_ENV) \
-		--param ASSET_ENV="$(ASSET_ENV)" \
-		--param TRAINER_ENV="$(LR_TRAINER_ENV)" \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param SIM_STARTING_CASH="$(SIM_STARTING_CASH)" \
-		--param SIM_MIN_INVEST="$(SIM_MIN_INVEST)" \
-		--param SIM_MAX_INVEST="$(SIM_MAX_INVEST)" \
-		--param SIM_CONFIDENCE_MULTIPLIER="$(SIM_CONFIDENCE_MULTIPLIER)" \
-		--param SIM_POSITION_MODE="$(SIM_POSITION_MODE)" \
-		--param SIM_SLIPPAGE="$(SIM_SLIPPAGE)" \
-		--param SIM_SPREAD_PCT="$(SIM_SPREAD_PCT)" \
-		--param POSITION_MODE="$(POSITION_MODE)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param LR="$(LR)" \
-		--param EPOCHS="$(EPOCHS)" \
-		--param L2="$(L2)" \
-		--param CLASS_WEIGHT_MODE="$(CLASS_WEIGHT_MODE)" \
-		--param DECISION_THRESHOLD="$(DECISION_THRESHOLD)" \
-		--param THRESHOLD_GRID="$(THRESHOLD_GRID)" \
-		--param OPTIMIZE_METRIC="$(OPTIMIZE_METRIC)" \
-		--param RAW_DATA="$(RAW_DATA)" \
-		--param FEATURES_DATA="$(FEATURES_DATA)" \
-		--param FEATURES_META="$(FEATURES_META)" \
-		--param MODEL_OUT="$(MODEL_OUT)" \
-		--param TRAIN_METRICS="$(TRAIN_METRICS)" \
-		--param BACKTEST_REPORT="$(BACKTEST_REPORT)" \
-		--param PREDICTIONS_OUT="$(PREDICTIONS_OUT)"
+	@scripts/archive_run.sh lr
 
 xgb-features: dirs
 	$(PYTHON) src/features.py \
@@ -694,148 +470,16 @@ gxboost-train: xgb-train
 gxboost-backtest: xgb-backtest
 
 xgb-save-run: dirs
-	$(PYTHON) src/archive_model.py \
-		--run-store $(RUNS_ROOT) \
-		--current-root $(CURRENT_ROOT) \
-		--write-current \
-		--family xgb \
-		--model-type xgboost \
-		--backend xgboost \
-		--asset-env $(ASSET_ENV) \
-		--trainer-env $(XGB_TRAINER_ENV) \
-		--model $(XGB_MODEL_OUT) \
-		--train-metrics $(XGB_TRAIN_METRICS) \
-		--backtest-report $(XGB_BACKTEST_REPORT) \
-		--predictions $(XGB_PREDICTIONS_OUT) \
-		--sim-report $(XGB_SIM_REPORT) \
-		--sim-trades $(XGB_SIM_TRADES) \
-		--visualization $(XGB_VISUALIZATION_OUT) \
-		--sim-visualization $(XGB_SIM_VISUALIZATION_OUT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--param ASSET_ENV="$(ASSET_ENV)" \
-		--param TRAINER_ENV="$(XGB_TRAINER_ENV)" \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param SIM_STARTING_CASH="$(SIM_STARTING_CASH)" \
-		--param SIM_MIN_INVEST="$(SIM_MIN_INVEST)" \
-		--param SIM_MAX_INVEST="$(SIM_MAX_INVEST)" \
-		--param SIM_CONFIDENCE_MULTIPLIER="$(SIM_CONFIDENCE_MULTIPLIER)" \
-		--param SIM_POSITION_MODE="$(SIM_POSITION_MODE)" \
-		--param SIM_SLIPPAGE="$(SIM_SLIPPAGE)" \
-		--param SIM_SPREAD_PCT="$(SIM_SPREAD_PCT)" \
-		--param POSITION_MODE="$(POSITION_MODE)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param XGB_N_ESTIMATORS="$(XGB_N_ESTIMATORS)" \
-		--param XGB_MAX_DEPTH="$(XGB_MAX_DEPTH)" \
-		--param XGB_LEARNING_RATE="$(XGB_LEARNING_RATE)" \
-		--param XGB_SUBSAMPLE="$(XGB_SUBSAMPLE)" \
-		--param XGB_COLSAMPLE_BYTREE="$(XGB_COLSAMPLE_BYTREE)" \
-		--param XGB_MIN_CHILD_WEIGHT="$(XGB_MIN_CHILD_WEIGHT)" \
-		--param XGB_REG_LAMBDA="$(XGB_REG_LAMBDA)" \
-		--param XGB_REG_ALPHA="$(XGB_REG_ALPHA)" \
-		--param XGB_GAMMA="$(XGB_GAMMA)" \
-		--param XGB_TREE_METHOD="$(XGB_TREE_METHOD)" \
-		--param XGB_DEVICE="$(XGB_DEVICE)" \
-		--param XGB_N_JOBS="$(XGB_N_JOBS)" \
-		--param XGB_CLASS_WEIGHT_MODE="$(XGB_CLASS_WEIGHT_MODE)" \
-		--param XGB_POS_WEIGHT="$(XGB_POS_WEIGHT)" \
-		--param XGB_SEED="$(XGB_SEED)" \
-		--param DECISION_THRESHOLD="$(DECISION_THRESHOLD)" \
-		--param THRESHOLD_GRID="$(THRESHOLD_GRID)" \
-		--param OPTIMIZE_METRIC="$(OPTIMIZE_METRIC)" \
-		--param RAW_DATA="$(RAW_DATA)" \
-		--param XGB_FEATURES_DATA="$(XGB_FEATURES_DATA)" \
-		--param XGB_FEATURES_META="$(XGB_FEATURES_META)" \
-		--param XGB_MODEL_OUT="$(XGB_MODEL_OUT)" \
-		--param XGB_TRAIN_METRICS="$(XGB_TRAIN_METRICS)" \
-		--param XGB_BACKTEST_REPORT="$(XGB_BACKTEST_REPORT)" \
-		--param XGB_PREDICTIONS_OUT="$(XGB_PREDICTIONS_OUT)" \
-		--param XGB_SIM_DEFAULT_TEST_FRACTION="$(XGB_SIM_DEFAULT_TEST_FRACTION)" \
-		--param XGB_SIM_REPORT="$(XGB_SIM_REPORT)" \
-		--param XGB_SIM_TRADES="$(XGB_SIM_TRADES)"
+	@scripts/archive_run.sh xgb
 
 xgb-visualize: dirs
-	$(PYTHON) src/visualize.py \
-		--raw-data $(RAW_DATA) \
-		--predictions $(XGB_PREDICTIONS_OUT) \
-		--output $(XGB_VISUALIZATION_OUT) \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--trade-mode $(TRADE_MODE) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		--fee $(FEE) \
-		--starting-cash $(VIS_STARTING_CASH) \
-		--baseline-ma-window $(VIS_BASELINE_MA_WINDOW) \
-		--max-browser-points $(VIS_MAX_BROWSER_POINTS) \
-		--title "$(SYMBOL) $(INTERVAL) XGBoost Inspection" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(XGB_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(XGB_SIM_VISUALIZATION_URL_PATH)
-	@echo "XGBoost visualization: $(XGB_VISUALIZATION_OUT)"
+	@scripts/visualize_model.sh xgb
 
 xgb-sim gxboost-sim: dirs
-	$(PYTHON) src/daily_bank_sim.py \
-		--predictions $(XGB_PREDICTIONS_OUT) \
-		$(SIM_WINDOW_ARGS) \
-		--default-test-fraction $(XGB_SIM_DEFAULT_TEST_FRACTION) \
-		--position-mode $(SIM_POSITION_MODE) \
-		--starting-cash $(SIM_STARTING_CASH) \
-		--min-invest $(SIM_MIN_INVEST) \
-		--max-invest '$(SIM_MAX_INVEST)' \
-		--max-short-invest '$(SIM_MAX_SHORT_INVEST)' \
-		--confidence-multiplier $(SIM_CONFIDENCE_MULTIPLIER) \
-		--short-confidence-multiplier $(SIM_SHORT_CONFIDENCE_MULTIPLIER) \
-		--trade-mode long_only \
-		--comparison-trade-mode long_short \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		$(if $(filter 1 true yes,$(ALLOW_FLIP_POSITION)),--allow-flip-position,--no-allow-flip-position) \
-		--borrow-fee $(BORROW_FEE) \
-		--leverage $(LEVERAGE) \
-		--liquidation-simulation $(LIQUIDATION_SIMULATION) \
-		--fee $(FEE) \
-		--max-hold-bars $(MAX_HOLD_BARS) \
-		--stop-loss $(STOP_LOSS) \
-		--take-profit $(TAKE_PROFIT) \
-		--slippage $(SIM_SLIPPAGE) \
-		--spread-pct $(SIM_SPREAD_PCT) \
-		--report-out $(XGB_SIM_REPORT) \
-		--trades-out $(XGB_SIM_TRADES) \
-		--comparison-report-out $(XGB_SIM_LONG_SHORT_REPORT) \
-		--comparison-trades-out $(XGB_SIM_LONG_SHORT_TRADES)
-	@echo "XGBoost bank report: $(XGB_SIM_REPORT)"
-	@echo "XGBoost bank trades: $(XGB_SIM_TRADES)"
-	@echo "XGBoost simulation default test fraction: $(XGB_SIM_DEFAULT_TEST_FRACTION)"
+	@scripts/simulate_predictions.sh xgb
 
 xgb-sim-visualize: dirs
-	$(PYTHON) src/visualize_sim.py \
-		--raw-data $(RAW_DATA) \
-		--trades $(XGB_SIM_TRADES) \
-		--report $(XGB_SIM_REPORT) \
-		--comparison-trades $(XGB_SIM_LONG_SHORT_TRADES) \
-		--comparison-report $(XGB_SIM_LONG_SHORT_REPORT) \
-		--output $(XGB_SIM_VISUALIZATION_OUT) \
-		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
-		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--baseline-ma-windows $(SIM_BASELINE_MA_WINDOWS) \
-		--title "$(SYMBOL) $(INTERVAL) XGBoost Bank Simulation" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(XGB_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(XGB_SIM_VISUALIZATION_URL_PATH)
-	@echo "XGBoost simulation visualization: $(XGB_SIM_VISUALIZATION_OUT)"
+	@scripts/visualize_sim.sh xgb
 
 xgb-sim-graph: xgb-sim-visualize reports-index
 	@echo "Open this on your other laptop:"
@@ -852,26 +496,7 @@ xgb-graph: xgb-visualize reports-index
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(XGB_VISUALIZATION_URL_PATH)
 
 xgb-preflight:
-	$(MAKE) download \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet
-	$(MAKE) xgb-experiment \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet \
-		XGB_FEATURES_DATA=data/features/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_features.parquet \
-		XGB_FEATURES_META=data/features/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_features.meta.json \
-		XGB_MODEL_OUT=models/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_model.json \
-		XGB_TRAIN_METRICS=models/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_train_metrics.json \
-		XGB_BACKTEST_REPORT=models/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_backtest_report.json \
-		XGB_PREDICTIONS_OUT=data/reports/xgb/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_predictions.parquet \
-		XGB_N_ESTIMATORS=20 \
-		XGB_MAX_DEPTH=2 \
-		XGB_N_JOBS=2 \
-		XGB_DEVICE=cuda
+	@scripts/preflight.sh xgb
 
 strategy-train: dirs
 	$(PYTHON) src/strategy_model/train_strategy.py \
@@ -912,142 +537,24 @@ strategy-experiment: strategy-train strategy-backtest
 	fi
 
 strategy-visualize: dirs
-	$(PYTHON) src/visualize.py \
-		--raw-data $(RAW_DATA) \
-		--predictions $(STRATEGY_PREDICTIONS_OUT) \
-		--output $(STRATEGY_VISUALIZATION_OUT) \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--trade-mode $(TRADE_MODE) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		--fee $(FEE) \
-		--starting-cash $(VIS_STARTING_CASH) \
-		--baseline-ma-window $(VIS_BASELINE_MA_WINDOW) \
-		--max-browser-points $(VIS_MAX_BROWSER_POINTS) \
-		--title "$(SYMBOL) $(INTERVAL) Strategy $(STRATEGY_MODEL_TYPE) Inspection" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(STRATEGY_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(STRATEGY_SIM_VISUALIZATION_URL_PATH)
-	@echo "Strategy visualization: $(STRATEGY_VISUALIZATION_OUT)"
+	@scripts/visualize_model.sh strategy
 
 strategy-sim: dirs
-	$(PYTHON) src/daily_bank_sim.py \
-		--predictions $(STRATEGY_PREDICTIONS_OUT) \
-		$(SIM_WINDOW_ARGS) \
-		--default-test-fraction $(STRATEGY_SIM_DEFAULT_TEST_FRACTION) \
-		--position-mode $(SIM_POSITION_MODE) \
-		--starting-cash $(SIM_STARTING_CASH) \
-		--min-invest $(SIM_MIN_INVEST) \
-		--max-invest '$(SIM_MAX_INVEST)' \
-		--max-short-invest '$(SIM_MAX_SHORT_INVEST)' \
-		--confidence-multiplier $(SIM_CONFIDENCE_MULTIPLIER) \
-		--short-confidence-multiplier $(SIM_SHORT_CONFIDENCE_MULTIPLIER) \
-		--trade-mode long_only \
-		--comparison-trade-mode long_short \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		$(if $(filter 1 true yes,$(ALLOW_FLIP_POSITION)),--allow-flip-position,--no-allow-flip-position) \
-		--borrow-fee $(BORROW_FEE) \
-		--leverage $(LEVERAGE) \
-		--liquidation-simulation $(LIQUIDATION_SIMULATION) \
-		--fee $(FEE) \
-		--max-hold-bars $(MAX_HOLD_BARS) \
-		--stop-loss $(STOP_LOSS) \
-		--take-profit $(TAKE_PROFIT) \
-		--slippage $(SIM_SLIPPAGE) \
-		--spread-pct $(SIM_SPREAD_PCT) \
-		--report-out $(STRATEGY_SIM_REPORT) \
-		--trades-out $(STRATEGY_SIM_TRADES) \
-		--comparison-report-out $(STRATEGY_SIM_LONG_SHORT_REPORT) \
-		--comparison-trades-out $(STRATEGY_SIM_LONG_SHORT_TRADES)
-	@echo "Strategy bank report: $(STRATEGY_SIM_REPORT)"
-	@echo "Strategy bank trades: $(STRATEGY_SIM_TRADES)"
+	@scripts/simulate_predictions.sh strategy
 
 strategy-sim-visualize: dirs
-	$(PYTHON) src/visualize_sim.py \
-		--raw-data $(RAW_DATA) \
-		--trades $(STRATEGY_SIM_TRADES) \
-		--report $(STRATEGY_SIM_REPORT) \
-		--comparison-trades $(STRATEGY_SIM_LONG_SHORT_TRADES) \
-		--comparison-report $(STRATEGY_SIM_LONG_SHORT_REPORT) \
-		--output $(STRATEGY_SIM_VISUALIZATION_OUT) \
-		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
-		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--baseline-ma-windows $(SIM_BASELINE_MA_WINDOWS) \
-		--title "$(SYMBOL) $(INTERVAL) Strategy $(STRATEGY_MODEL_TYPE) Bank Simulation" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(STRATEGY_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(STRATEGY_SIM_VISUALIZATION_URL_PATH)
-	@echo "Strategy simulation visualization: $(STRATEGY_SIM_VISUALIZATION_OUT)"
+	@scripts/visualize_sim.sh strategy
 
 strategy-graph: strategy-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(STRATEGY_VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(STRATEGY_VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(STRATEGY_VISUALIZATION_URL_PATH)
 
 strategy-sim-graph: strategy-sim-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(STRATEGY_SIM_VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(STRATEGY_SIM_VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(STRATEGY_SIM_VISUALIZATION_URL_PATH)
 
 strategy-save-run: dirs
-	$(PYTHON) src/archive_model.py \
-		--run-store $(RUNS_ROOT) \
-		--current-root $(CURRENT_ROOT) \
-		--write-current \
-		--family strategy \
-		--model-type $(STRATEGY_MODEL_TYPE) \
-		--backend rule_based \
-		--asset-env $(ASSET_ENV) \
-		--trainer-env $(STRATEGY_TRAINER_ENV) \
-		--model $(STRATEGY_MODEL_OUT) \
-		--train-metrics $(STRATEGY_TRAIN_METRICS) \
-		--backtest-report $(STRATEGY_BACKTEST_REPORT) \
-		--predictions $(STRATEGY_PREDICTIONS_OUT) \
-		--sim-report $(STRATEGY_SIM_REPORT) \
-		--sim-trades $(STRATEGY_SIM_TRADES) \
-		--visualization $(STRATEGY_VISUALIZATION_OUT) \
-		--sim-visualization $(STRATEGY_SIM_VISUALIZATION_OUT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--param ASSET_ENV="$(ASSET_ENV)" \
-		--param TRAINER_ENV="$(STRATEGY_TRAINER_ENV)" \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param SIM_STARTING_CASH="$(SIM_STARTING_CASH)" \
-		--param SIM_MIN_INVEST="$(SIM_MIN_INVEST)" \
-		--param SIM_MAX_INVEST="$(SIM_MAX_INVEST)" \
-		--param SIM_CONFIDENCE_MULTIPLIER="$(SIM_CONFIDENCE_MULTIPLIER)" \
-		--param SIM_POSITION_MODE="$(SIM_POSITION_MODE)" \
-		--param SIM_SLIPPAGE="$(SIM_SLIPPAGE)" \
-		--param SIM_SPREAD_PCT="$(SIM_SPREAD_PCT)" \
-		--param POSITION_MODE="$(POSITION_MODE)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param STRATEGY_MODEL_TYPE="$(STRATEGY_MODEL_TYPE)" \
-		--param STRATEGY_MA_WINDOW="$(STRATEGY_MA_WINDOW)" \
-		--param RAW_DATA="$(RAW_DATA)" \
-		--param STRATEGY_MODEL_OUT="$(STRATEGY_MODEL_OUT)" \
-		--param STRATEGY_TRAIN_METRICS="$(STRATEGY_TRAIN_METRICS)" \
-		--param STRATEGY_BACKTEST_REPORT="$(STRATEGY_BACKTEST_REPORT)" \
-		--param STRATEGY_PREDICTIONS_OUT="$(STRATEGY_PREDICTIONS_OUT)" \
-		--param STRATEGY_SIM_REPORT="$(STRATEGY_SIM_REPORT)" \
-		--param STRATEGY_SIM_TRADES="$(STRATEGY_SIM_TRADES)"
+	@scripts/archive_run.sh strategy
 
 list-runs:
 	$(PYTHON) src/archive_model.py --list-runs --run-store $(RUNS_ROOT)
@@ -1056,150 +563,16 @@ show-current:
 	$(PYTHON) src/archive_model.py --show-current --current-root $(CURRENT_ROOT)
 
 nn-save save-nn-model: dirs
-	$(PYTHON) src/archive_model.py \
-		--archive-root $(NN_ARCHIVE_ROOT) \
-		$(NN_ARCHIVE_NAME_ARG) \
-		--model $(NN_MODEL_OUT) \
-		--train-metrics $(NN_TRAIN_METRICS) \
-		--backtest-report $(NN_BACKTEST_REPORT) \
-		--predictions $(NN_PREDICTIONS_OUT) \
-		--sim-report $(NN_SIM_REPORT) \
-		--sim-trades $(NN_SIM_TRADES) \
-		--visualization $(NN_VISUALIZATION_OUT) \
-		--sim-visualization $(NN_SIM_VISUALIZATION_OUT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--include-diff \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param POSITION_MODE="$(POSITION_MODE)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param NN_BACKEND="$(NN_BACKEND)" \
-		--param NN_DEVICE="$(NN_DEVICE)" \
-		--param NN_MODEL_TYPE="$(NN_MODEL_TYPE)" \
-		--param NN_LOOKBACK="$(NN_LOOKBACK)" \
-		--param NN_SEQUENCE_FEATURE_SET="$(NN_SEQUENCE_FEATURE_SET)" \
-		--param NN_CNN_FILTERS="$(NN_CNN_FILTERS)" \
-		--param NN_CNN_KERNEL_SIZES="$(NN_CNN_KERNEL_SIZES)" \
-		--param NN_LSTM_HIDDEN_SIZE="$(NN_LSTM_HIDDEN_SIZE)" \
-		--param NN_LSTM_LAYERS="$(NN_LSTM_LAYERS)" \
-		--param NN_LSTM_DROPOUT="$(NN_LSTM_DROPOUT)" \
-		--param NN_GRU_HIDDEN_SIZE="$(NN_GRU_HIDDEN_SIZE)" \
-		--param NN_GRU_LAYERS="$(NN_GRU_LAYERS)" \
-		--param NN_GRU_DROPOUT="$(NN_GRU_DROPOUT)" \
-		--param NN_TRANSFORMER_D_MODEL="$(NN_TRANSFORMER_D_MODEL)" \
-		--param NN_TRANSFORMER_HEADS="$(NN_TRANSFORMER_HEADS)" \
-		--param NN_TRANSFORMER_LAYERS="$(NN_TRANSFORMER_LAYERS)" \
-		--param NN_TRANSFORMER_FF_DIM="$(NN_TRANSFORMER_FF_DIM)" \
-		--param NN_TRANSFORMER_DROPOUT="$(NN_TRANSFORMER_DROPOUT)" \
-		--param NN_HIDDEN_LAYERS="$(NN_HIDDEN_LAYERS)" \
-		--param NN_LR="$(NN_LR)" \
-		--param NN_EPOCHS="$(NN_EPOCHS)" \
-		--param NN_BATCH_SIZE="$(NN_BATCH_SIZE)" \
-		--param NN_L2="$(NN_L2)" \
-		--param NN_CLASS_WEIGHT_MODE="$(NN_CLASS_WEIGHT_MODE)" \
-		--param NN_SEED="$(NN_SEED)" \
-		--param DECISION_THRESHOLD="$(DECISION_THRESHOLD)" \
-		--param THRESHOLD_GRID="$(THRESHOLD_GRID)" \
-		--param OPTIMIZE_METRIC="$(OPTIMIZE_METRIC)" \
-		--param SIM_START="$(SIM_START)" \
-		--param SIM_DURATION="$(SIM_DURATION)" \
-		--param SIM_DEFAULT_TEST_FRACTION="$(SIM_DEFAULT_TEST_FRACTION)" \
-		--param SIM_STARTING_CASH="$(SIM_STARTING_CASH)" \
-		--param SIM_MIN_INVEST="$(SIM_MIN_INVEST)" \
-		--param SIM_MAX_INVEST="$(SIM_MAX_INVEST)" \
-		--param SIM_CONFIDENCE_MULTIPLIER="$(SIM_CONFIDENCE_MULTIPLIER)" \
-		--param SIM_POSITION_MODE="$(SIM_POSITION_MODE)" \
-		--param SIM_SLIPPAGE="$(SIM_SLIPPAGE)" \
-		--param SIM_SPREAD_PCT="$(SIM_SPREAD_PCT)" \
-		--param RAW_DATA="$(RAW_DATA)" \
-		--param NN_MODEL_OUT="$(NN_MODEL_OUT)" \
-		--param NN_TRAIN_METRICS="$(NN_TRAIN_METRICS)" \
-		--param NN_BACKTEST_REPORT="$(NN_BACKTEST_REPORT)" \
-		--param NN_PREDICTIONS_OUT="$(NN_PREDICTIONS_OUT)" \
-		--param NN_SIM_REPORT="$(NN_SIM_REPORT)" \
-		--param NN_SIM_TRADES="$(NN_SIM_TRADES)"
+	@scripts/archive_run.sh nn-save
 
 nn-visualize: dirs
-	$(PYTHON) src/visualize.py \
-		--raw-data $(RAW_DATA) \
-		--predictions $(NN_PREDICTIONS_OUT) \
-		--output $(NN_VISUALIZATION_OUT) \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--trade-mode $(TRADE_MODE) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		--fee $(FEE) \
-		--starting-cash $(VIS_STARTING_CASH) \
-		--baseline-ma-window $(VIS_BASELINE_MA_WINDOW) \
-		--max-browser-points $(VIS_MAX_BROWSER_POINTS) \
-		--title "$(SYMBOL) $(INTERVAL) Sequence NN Inspection" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(NN_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(NN_SIM_VISUALIZATION_URL_PATH)
-	@echo "Sequence NN visualization: $(NN_VISUALIZATION_OUT)"
+	@scripts/visualize_model.sh nn
 
 nn-sim: dirs
-	$(PYTHON) src/daily_bank_sim.py \
-		--predictions $(NN_PREDICTIONS_OUT) \
-		$(SIM_WINDOW_ARGS) \
-		--default-test-fraction $(SIM_DEFAULT_TEST_FRACTION) \
-		--position-mode $(SIM_POSITION_MODE) \
-		--starting-cash $(SIM_STARTING_CASH) \
-		--min-invest $(SIM_MIN_INVEST) \
-		--max-invest '$(SIM_MAX_INVEST)' \
-		--max-short-invest '$(SIM_MAX_SHORT_INVEST)' \
-		--confidence-multiplier $(SIM_CONFIDENCE_MULTIPLIER) \
-		--short-confidence-multiplier $(SIM_SHORT_CONFIDENCE_MULTIPLIER) \
-		--trade-mode long_only \
-		--comparison-trade-mode long_short \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		$(if $(filter 1 true yes,$(ALLOW_FLIP_POSITION)),--allow-flip-position,--no-allow-flip-position) \
-		--borrow-fee $(BORROW_FEE) \
-		--leverage $(LEVERAGE) \
-		--liquidation-simulation $(LIQUIDATION_SIMULATION) \
-		--fee $(FEE) \
-		--max-hold-bars $(MAX_HOLD_BARS) \
-		--stop-loss $(STOP_LOSS) \
-		--take-profit $(TAKE_PROFIT) \
-		--slippage $(SIM_SLIPPAGE) \
-		--spread-pct $(SIM_SPREAD_PCT) \
-		--report-out $(NN_SIM_REPORT) \
-		--trades-out $(NN_SIM_TRADES) \
-		--comparison-report-out $(NN_SIM_LONG_SHORT_REPORT) \
-		--comparison-trades-out $(NN_SIM_LONG_SHORT_TRADES)
-	@echo "Sequence NN daily bank report: $(NN_SIM_REPORT)"
-	@echo "Sequence NN daily bank trades: $(NN_SIM_TRADES)"
+	@scripts/simulate_predictions.sh nn
 
 nn-sim-visualize: dirs
-	$(PYTHON) src/visualize_sim.py \
-		--raw-data $(RAW_DATA) \
-		--trades $(NN_SIM_TRADES) \
-		--report $(NN_SIM_REPORT) \
-		--comparison-trades $(NN_SIM_LONG_SHORT_TRADES) \
-		--comparison-report $(NN_SIM_LONG_SHORT_REPORT) \
-		--output $(NN_SIM_VISUALIZATION_OUT) \
-		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
-		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--baseline-ma-windows $(SIM_BASELINE_MA_WINDOWS) \
-		--title "$(SYMBOL) $(INTERVAL) Sequence NN Bank Simulation" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(NN_VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(NN_SIM_VISUALIZATION_URL_PATH)
-	@echo "Sequence NN simulation visualization: $(NN_SIM_VISUALIZATION_OUT)"
+	@scripts/visualize_sim.sh nn
 
 lr-diagnostic: dirs
 	$(PYTHON) src/diagnostic_report.py \
@@ -1216,76 +589,13 @@ lr-diagnostic: dirs
 	@echo "Test predictions:  $(DIAG_TEST_PREDICTIONS)"
 
 lr-visualize: dirs
-	$(PYTHON) src/visualize.py \
-		--raw-data $(RAW_DATA) \
-		--predictions $(PREDICTIONS_OUT) \
-		--output $(VISUALIZATION_OUT) \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--trade-mode $(TRADE_MODE) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		--fee $(FEE) \
-		--starting-cash $(VIS_STARTING_CASH) \
-		--baseline-ma-window $(VIS_BASELINE_MA_WINDOW) \
-		--max-browser-points $(VIS_MAX_BROWSER_POINTS) \
-		--title "$(SYMBOL) $(INTERVAL) Model Inspection" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(SIM_VISUALIZATION_URL_PATH)
-	@echo "Visualization: $(VISUALIZATION_OUT)"
+	@scripts/visualize_model.sh lr
 
 lr-sim: dirs
-	$(PYTHON) src/daily_bank_sim.py \
-		--predictions $(PREDICTIONS_OUT) \
-		$(SIM_WINDOW_ARGS) \
-		--default-test-fraction $(SIM_DEFAULT_TEST_FRACTION) \
-		--position-mode $(SIM_POSITION_MODE) \
-		--starting-cash $(SIM_STARTING_CASH) \
-		--min-invest $(SIM_MIN_INVEST) \
-		--max-invest '$(SIM_MAX_INVEST)' \
-		--max-short-invest '$(SIM_MAX_SHORT_INVEST)' \
-		--confidence-multiplier $(SIM_CONFIDENCE_MULTIPLIER) \
-		--short-confidence-multiplier $(SIM_SHORT_CONFIDENCE_MULTIPLIER) \
-		--trade-mode long_only \
-		--comparison-trade-mode long_short \
-		--threshold $(THRESHOLD) \
-		--exit-threshold $(EXIT_THRESHOLD) \
-		--short-entry-threshold $(SHORT_ENTRY_THRESHOLD) \
-		--short-exit-threshold $(SHORT_EXIT_THRESHOLD) \
-		$(if $(filter 1 true yes,$(ALLOW_FLIP_POSITION)),--allow-flip-position,--no-allow-flip-position) \
-		--borrow-fee $(BORROW_FEE) \
-		--leverage $(LEVERAGE) \
-		--liquidation-simulation $(LIQUIDATION_SIMULATION) \
-		--fee $(FEE) \
-		--max-hold-bars $(MAX_HOLD_BARS) \
-		--stop-loss $(STOP_LOSS) \
-		--take-profit $(TAKE_PROFIT) \
-		--slippage $(SIM_SLIPPAGE) \
-		--spread-pct $(SIM_SPREAD_PCT) \
-		--report-out $(SIM_REPORT) \
-		--trades-out $(SIM_TRADES) \
-		--comparison-report-out $(SIM_LONG_SHORT_REPORT) \
-		--comparison-trades-out $(SIM_LONG_SHORT_TRADES)
-	@echo "Daily bank report: $(SIM_REPORT)"
-	@echo "Daily bank trades: $(SIM_TRADES)"
+	@scripts/simulate_predictions.sh lr
 
 lr-sim-visualize: dirs
-	$(PYTHON) src/visualize_sim.py \
-		--raw-data $(RAW_DATA) \
-		--trades $(SIM_TRADES) \
-		--report $(SIM_REPORT) \
-		--comparison-trades $(SIM_LONG_SHORT_TRADES) \
-		--comparison-report $(SIM_LONG_SHORT_REPORT) \
-		--output $(SIM_VISUALIZATION_OUT) \
-		--activity-bucket $(SIM_ACTIVITY_BUCKET) \
-		--marker-size-basis $(SIM_MARKER_SIZE_BASIS) \
-		--baseline-ma-windows $(SIM_BASELINE_MA_WINDOWS) \
-		--title "$(SYMBOL) $(INTERVAL) Logistic Regression Bank Simulation" \
-		--nav-home-url /$(REPORTS_INDEX_URL_PATH) \
-		--nav-model-url /$(VISUALIZATION_URL_PATH) \
-		--nav-sim-url /$(SIM_VISUALIZATION_URL_PATH)
-	@echo "Daily bank visualization: $(SIM_VISUALIZATION_OUT)"
+	@scripts/visualize_sim.sh lr
 
 day-sim: sim
 
@@ -1295,99 +605,16 @@ serve-reports:
 CHECK_URL_PATH ?= $(REPORTS_INDEX_URL_PATH)
 
 start: dirs reports-index
-	@if curl -fsS --max-time 2 "http://$(REPORTS_HOST):$(REPORTS_PORT)/api/dashboard/status" >/dev/null 2>&1; then \
-		echo "CryptoPred dashboard already running:"; \
-		echo "  main: http://$(REPORTS_HOST):$(REPORTS_PORT)/"; \
-		echo "  models: http://$(REPORTS_HOST):$(REPORTS_PORT)/models"; \
-		echo "  compare: http://$(REPORTS_HOST):$(REPORTS_PORT)/compare"; \
-		echo "  reports: http://$(REPORTS_HOST):$(REPORTS_PORT)/reports"; \
-		echo "  live: http://$(REPORTS_HOST):$(REPORTS_PORT)/live"; \
-		exit 0; \
-	fi
-	@mkdir -p data/reports
-	@echo "Starting CryptoPred dashboard in the background:"
-	@echo "  main: http://$(REPORTS_HOST):$(REPORTS_PORT)/"
-	@echo "  models: http://$(REPORTS_HOST):$(REPORTS_PORT)/models"
-	@echo "  compare: http://$(REPORTS_HOST):$(REPORTS_PORT)/compare"
-	@echo "  reports: http://$(REPORTS_HOST):$(REPORTS_PORT)/reports"
-	@echo "  live: http://$(REPORTS_HOST):$(REPORTS_PORT)/live"
-	@echo "  live Docker target: $(LIVE_PUBLIC_URL)"
-	@setsid $(PYTHON) src/dashboard_server.py \
-		--host $(REPORTS_HOST) \
-		--port $(REPORTS_PORT) \
-		--reports-root data/reports \
-		--root . \
-		--live-url $(LIVE_LOCAL_URL) \
-		--live-public-url $(LIVE_PUBLIC_URL) \
-		> data/reports/dashboard_server.log 2>&1 < /dev/null &
-	@sleep 1
-	@curl -fsS --max-time 3 "http://$(REPORTS_HOST):$(REPORTS_PORT)/api/dashboard/status" >/dev/null \
-		&& echo "Dashboard started. Logs: data/reports/dashboard_server.log" \
-		|| { echo "Dashboard did not respond. Check data/reports/dashboard_server.log"; exit 1; }
+	@scripts/dashboard.sh start
 
 start-fg: dirs reports-index
-	@echo "Starting CryptoPred dashboard:"
-	@echo "  main: http://$(REPORTS_HOST):$(REPORTS_PORT)/"
-	@echo "  models: http://$(REPORTS_HOST):$(REPORTS_PORT)/models"
-	@echo "  compare: http://$(REPORTS_HOST):$(REPORTS_PORT)/compare"
-	@echo "  reports: http://$(REPORTS_HOST):$(REPORTS_PORT)/reports"
-	@echo "  live: http://$(REPORTS_HOST):$(REPORTS_PORT)/live"
-	@echo "  live Docker target: $(LIVE_PUBLIC_URL)"
-	$(PYTHON) src/dashboard_server.py \
-		--host $(REPORTS_HOST) \
-		--port $(REPORTS_PORT) \
-		--reports-root data/reports \
-		--root . \
-		--live-url $(LIVE_LOCAL_URL) \
-		--live-public-url $(LIVE_PUBLIC_URL)
+	@scripts/dashboard.sh start-fg
 
 stop:
-	@echo "Stopping any server listening on port $(REPORTS_PORT)..."
-	@PIDS="$$( \
-		if command -v lsof >/dev/null 2>&1; then \
-			lsof -tiTCP:$(REPORTS_PORT) -sTCP:LISTEN 2>/dev/null; \
-		elif command -v fuser >/dev/null 2>&1; then \
-			fuser -n tcp $(REPORTS_PORT) 2>/dev/null; \
-		elif command -v ss >/dev/null 2>&1; then \
-			ss -ltnp "sport = :$(REPORTS_PORT)" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'; \
-		else \
-			echo ""; \
-		fi \
-		| sort -u)"; \
-	if [ -z "$$PIDS" ]; then \
-		echo "No process is listening on port $(REPORTS_PORT)."; \
-		exit 0; \
-	fi; \
-	echo "Killing PID(s): $$PIDS"; \
-	kill $$PIDS 2>/dev/null || true; \
-	sleep 1; \
-	STILL="$$( \
-		if command -v lsof >/dev/null 2>&1; then \
-			lsof -tiTCP:$(REPORTS_PORT) -sTCP:LISTEN 2>/dev/null; \
-		elif command -v fuser >/dev/null 2>&1; then \
-			fuser -n tcp $(REPORTS_PORT) 2>/dev/null; \
-		elif command -v ss >/dev/null 2>&1; then \
-			ss -ltnp "sport = :$(REPORTS_PORT)" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'; \
-		else \
-			echo ""; \
-		fi \
-		| sort -u)"; \
-	if [ -n "$$STILL" ]; then \
-		echo "Force killing PID(s): $$STILL"; \
-		kill -9 $$STILL 2>/dev/null || true; \
-	fi; \
-	echo "Stopped server on port $(REPORTS_PORT)."
+	@scripts/dashboard.sh stop
 
 serve-reports-lan:
-	@if curl -fsS --max-time 2 "http://$(REPORTS_HOST):$(REPORTS_PORT)/api/dashboard/status" >/dev/null 2>&1; then \
-		echo "Dashboard server already appears to be running on $(REPORTS_HOST):$(REPORTS_PORT)."; \
-	elif curl -fsS --max-time 2 "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(CHECK_URL_PATH)" >/dev/null 2>&1; then \
-		echo "Port $(REPORTS_PORT) is already serving reports, but not the new dashboard."; \
-		echo "Stop the old server, then run: make start"; \
-		exit 1; \
-	else \
-		$(MAKE) start; \
-	fi
+	@scripts/dashboard.sh serve-lan
 
 reports-index: dirs
 	$(PYTHON) src/report_index.py \
@@ -1404,10 +631,7 @@ reports-index: dirs
 	@echo "Reports index: $(REPORTS_INDEX_OUT)"
 
 nn-graph: nn-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(NN_VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(NN_VISUALIZATION_URL_PATH)
 
 nn-serve-lan: nn-graph
@@ -1419,26 +643,17 @@ graph: nn-graph
 serve-lan: graph
 
 nn-sim-graph: nn-sim-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(NN_SIM_VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(NN_SIM_VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(NN_SIM_VISUALIZATION_URL_PATH)
 
 lr-graph: lr-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(VISUALIZATION_URL_PATH)
 
 lr-serve-lan: lr-graph
 
 lr-sim-graph: lr-sim-visualize reports-index
-	@echo "Open this on your other laptop:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(SIM_VISUALIZATION_URL_PATH)"
-	@echo "Report index:"
-	@echo "http://$(REPORTS_HOST):$(REPORTS_PORT)/$(REPORTS_INDEX_URL_PATH)"
+	@scripts/dashboard.sh print-url $(SIM_VISUALIZATION_URL_PATH)
 	$(MAKE) serve-reports-lan CHECK_URL_PATH=$(SIM_VISUALIZATION_URL_PATH)
 
 lr-sweep: dirs
@@ -1456,45 +671,10 @@ lr-sweep: dirs
 		--fee $(FEE)
 
 preflight:
-	$(MAKE) download \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet
-	$(MAKE) experiment \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet \
-		NN_MODEL_OUT=models/nn/cnn/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_model.npz \
-		NN_TRAIN_METRICS=models/nn/cnn/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_train_metrics.json \
-		NN_BACKTEST_REPORT=models/nn/cnn/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_backtest_report.json \
-		NN_PREDICTIONS_OUT=data/reports/nn/cnn/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_predictions.parquet \
-		NN_MODEL_TYPE=cnn \
-		NN_LOOKBACK=20 \
-		NN_CNN_FILTERS=4,8 \
-		NN_CNN_KERNEL_SIZES=3,3 \
-		NN_EPOCHS=2 \
-		NN_HIDDEN_LAYERS=8 \
-		NN_BATCH_SIZE=128
+	@scripts/preflight.sh nn
 
 lr-preflight:
-	$(MAKE) download \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet
-	$(MAKE) lr-experiment \
-		INTERVAL=5m \
-		START=2026-01-10T00:00:00Z \
-		END=2026-01-13T00:00:00Z \
-		RAW_DATA=data/downloads/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_candles.parquet \
-		FEATURES_DATA=data/features/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_features.parquet \
-		FEATURES_META=data/features/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_features.meta.json \
-		MODEL_OUT=models/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_logreg.npz \
-		TRAIN_METRICS=models/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_train_metrics.json \
-		BACKTEST_REPORT=models/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_backtest_report.json \
-		PREDICTIONS_OUT=data/reports/lr/$(DATA_SOURCE)/$(SYMBOL)/5m/preflight_predictions.parquet
+	@scripts/preflight.sh lr
 
 clean:
 	rm -rf src/__pycache__
@@ -1536,235 +716,31 @@ REAL_MAX_TOTAL_USD ?= 20
 REAL_MAX_ORDER_USD ?= 5
 REAL_MIN_ORDER_USD ?= 1
 REAL_PORTFOLIO_MODE ?= account_balances
-REAL_CASH_ASSET ?= USD
+REAL_CASH_ASSET ?= USDC
 REAL_BASE_ASSET ?= SOL
 COINBASE_PRODUCT_ID ?= SOL-USD
 COINBASE_API_KEY ?=
 COINBASE_API_SECRET ?=
 COINBASE_TIMEOUT ?= 10
-REAL_ARM_TOKEN ?=
+SOLANA_RPC_URL ?= <your Helius or QuickNode RPC URL>
+SOLANA_KEYPAIR_PATH ?= /app/state/solana-keypair.json
+SOL_RESERVED_FOR_GAS ?= 0.02
+SOLANA_RPC_TIMEOUT ?= 10
+SOLANA_CONFIRM_POLLS ?= 20
+SOLANA_CONFIRM_DELAY_SECONDS ?= 1
+JUPITER_BASE_URL ?= https://lite-api.jup.ag/swap/v1
+JUPITER_PRODUCT_ID ?= SOL-USDC
+JUPITER_SLIPPAGE_BPS ?= 50
+JUPITER_PRIORITY_FEE_LAMPORTS ?= auto
+JUPITER_TIMEOUT ?= 10
+REAL_ARM_TOKEN ?= <local arm token, any text>
 REAL_ORDER_STATUS_POLLS ?= 5
 REAL_ORDER_STATUS_DELAY_SECONDS ?= 0.75
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
 
 live-sync:
-	@mkdir -p live_sim/state
-	@if [ -f "$(LIVE_MODEL_SOURCE)" ]; then \
-		cp "$(LIVE_MODEL_SOURCE)" live_sim/state/model.npz; \
-	elif [ -f live_sim/state/model.npz ]; then \
-		echo "Selected live model does not exist yet: $(LIVE_MODEL_SOURCE)"; \
-		echo "Keeping existing live_sim/state/model.npz until retraining activates a fresh model."; \
-	else \
-		echo "Missing selected live model: $(LIVE_MODEL_SOURCE)"; \
-		echo "Run make train or make experiment first, or keep an existing live_sim/state/model.npz."; \
-		exit 1; \
-	fi
-	@printf '%s\n' \
-		'SYMBOL=$(SYMBOL)' \
-		'INTERVAL=$(INTERVAL)' \
-		'BINANCE_BASE_URL=https://api.binance.com' \
-		'' \
-		'STARTING_CASH=$(LIVE_STARTING_CASH)' \
-		'FEE=$(FEE)' \
-		'SLIPPAGE=$(LIVE_SLIPPAGE)' \
-		'ENTRY_THRESHOLD=$(THRESHOLD)' \
-		'EXIT_THRESHOLD=$(EXIT_THRESHOLD)' \
-		'TRADE_MODE=$(TRADE_MODE)' \
-		'SHORT_ENTRY_THRESHOLD=$(SHORT_ENTRY_THRESHOLD)' \
-		'SHORT_EXIT_THRESHOLD=$(SHORT_EXIT_THRESHOLD)' \
-		'STOP_LOSS=$(STOP_LOSS)' \
-		'TAKE_PROFIT=$(TAKE_PROFIT)' \
-		'MAX_HOLD_BARS=$(MAX_HOLD_BARS)' \
-		'MAX_INVEST=$(LIVE_MAX_INVEST)' \
-		'MAX_SHORT_INVEST=$(LIVE_MAX_SHORT_INVEST)' \
-		'ALLOW_FLIP_POSITION=$(ALLOW_FLIP_POSITION)' \
-		'BORROW_FEE=$(BORROW_FEE)' \
-		'LEVERAGE=$(LEVERAGE)' \
-		'LIQUIDATION_SIMULATION=$(LIQUIDATION_SIMULATION)' \
-		'MIN_INVEST=$(LIVE_MIN_INVEST)' \
-		'CONFIDENCE_MULTIPLIER=$(LIVE_CONFIDENCE_MULTIPLIER)' \
-		'' \
-		'EXECUTION_MODE=$(EXECUTION_MODE)' \
-		'REAL_TRADING_ENABLED=$(REAL_TRADING_ENABLED)' \
-		'REAL_REQUIRE_MANUAL_ARM=$(REAL_REQUIRE_MANUAL_ARM)' \
-		'REAL_QUICK_ARM_ENABLED=$(REAL_QUICK_ARM_ENABLED)' \
-		'REAL_MAX_TOTAL_USD=$(REAL_MAX_TOTAL_USD)' \
-		'REAL_MAX_ORDER_USD=$(REAL_MAX_ORDER_USD)' \
-		'REAL_MIN_ORDER_USD=$(REAL_MIN_ORDER_USD)' \
-		'REAL_PORTFOLIO_MODE=$(REAL_PORTFOLIO_MODE)' \
-		'REAL_CASH_ASSET=$(REAL_CASH_ASSET)' \
-		'REAL_BASE_ASSET=$(REAL_BASE_ASSET)' \
-		'COINBASE_PRODUCT_ID=$(COINBASE_PRODUCT_ID)' \
-		'COINBASE_API_KEY=$(COINBASE_API_KEY)' \
-		'COINBASE_API_SECRET=$(COINBASE_API_SECRET)' \
-		'COINBASE_TIMEOUT=$(COINBASE_TIMEOUT)' \
-		'REAL_ARM_TOKEN=$(REAL_ARM_TOKEN)' \
-		'REAL_ORDER_STATUS_POLLS=$(REAL_ORDER_STATUS_POLLS)' \
-		'REAL_ORDER_STATUS_DELAY_SECONDS=$(REAL_ORDER_STATUS_DELAY_SECONDS)' \
-		'' \
-		'MODEL_PATH=/app/state/model.npz' \
-		'DB_PATH=/app/state/live_sim.db' \
-		'RESET_ON_START=false' \
-		'ALLOW_RESET_API=false' \
-		'POLL_ON_START=true' \
-		'POLL_DELAY_SECONDS=8' \
-		'KLINE_LIMIT_BUFFER=8' \
-		'CATCHUP_ENABLED=$(LIVE_CATCHUP_ENABLED)' \
-		'CATCHUP_SPREAD_PCT=$(LIVE_CATCHUP_SPREAD_PCT)' \
-		'CATCHUP_MAX_BARS=$(LIVE_CATCHUP_MAX_BARS)' \
-		'CATCHUP_RETRY_SECONDS=$(LIVE_CATCHUP_RETRY_SECONDS)' \
-		'' \
-		'RETRAIN_ENABLED=true' \
-		'RETRAIN_TIME_UTC=04:00' \
-		'RETRAIN_FREQUENCY=$(LIVE_RETRAIN_FREQUENCY)' \
-		'RETRAIN_LOOKBACK_DAYS=$(LIVE_RETRAIN_LOOKBACK_DAYS)' \
-		'RETRAIN_TRAIN_START=$(LIVE_RETRAIN_TRAIN_START)' \
-		'RETRAIN_TRAIN_END=$(LIVE_RETRAIN_TRAIN_END)' \
-		'RETRAIN_ON_START=false' \
-		'RETRAIN_KEEP_RUNS=10' \
-		'RETRAIN_CACHE_DIR=$(LIVE_RETRAIN_CACHE_DIR)' \
-		'TRAINING_RUNS_DIR=/app/state/training_runs' \
-		'' \
-		'TRAIN_MODEL_TYPE=$(LIVE_TRAIN_MODEL_TYPE)' \
-		'TRAIN_BACKEND=$(LIVE_TRAIN_BACKEND)' \
-		'TRAIN_DEVICE=$(LIVE_TRAIN_DEVICE)' \
-		'TRAIN_LOOKBACK=$(LIVE_TRAIN_LOOKBACK)' \
-		'TRAIN_SEQUENCE_FEATURE_SET=$(LIVE_TRAIN_SEQUENCE_FEATURE_SET)' \
-		'TRAIN_EDGE=$(LIVE_TRAIN_EDGE)' \
-		'TRAIN_SPLIT=$(SPLIT)' \
-		'TRAIN_USE_FULL_WINDOW=$(LIVE_TRAIN_USE_FULL_WINDOW)' \
-		'TRAIN_CNN_FILTERS=$(NN_CNN_FILTERS)' \
-		'TRAIN_CNN_KERNEL_SIZES=$(NN_CNN_KERNEL_SIZES)' \
-		'TRAIN_LSTM_HIDDEN_SIZE=$(NN_LSTM_HIDDEN_SIZE)' \
-		'TRAIN_LSTM_LAYERS=$(NN_LSTM_LAYERS)' \
-		'TRAIN_LSTM_DROPOUT=$(NN_LSTM_DROPOUT)' \
-		'TRAIN_GRU_HIDDEN_SIZE=$(NN_GRU_HIDDEN_SIZE)' \
-		'TRAIN_GRU_LAYERS=$(NN_GRU_LAYERS)' \
-		'TRAIN_GRU_DROPOUT=$(NN_GRU_DROPOUT)' \
-		'TRAIN_TRANSFORMER_D_MODEL=$(NN_TRANSFORMER_D_MODEL)' \
-		'TRAIN_TRANSFORMER_HEADS=$(NN_TRANSFORMER_HEADS)' \
-		'TRAIN_TRANSFORMER_LAYERS=$(NN_TRANSFORMER_LAYERS)' \
-		'TRAIN_TRANSFORMER_FF_DIM=$(NN_TRANSFORMER_FF_DIM)' \
-		'TRAIN_TRANSFORMER_DROPOUT=$(NN_TRANSFORMER_DROPOUT)' \
-		'TRAIN_HIDDEN_LAYERS=$(NN_HIDDEN_LAYERS)' \
-		'TRAIN_LR=$(NN_LR)' \
-		'TRAIN_EPOCHS=$(NN_EPOCHS)' \
-		'TRAIN_BATCH_SIZE=$(NN_BATCH_SIZE)' \
-		'TRAIN_L2=$(NN_L2)' \
-		'TRAIN_DECISION_THRESHOLD=$(THRESHOLD)' \
-		'TRAIN_THRESHOLD_GRID=$(THRESHOLD_GRID)' \
-		'TRAIN_OPTIMIZE_METRIC=$(OPTIMIZE_METRIC)' \
-		'TRAIN_CLASS_WEIGHT_MODE=$(NN_CLASS_WEIGHT_MODE)' \
-		'TRAIN_SEED=$(NN_SEED)' \
-		'' \
-		'HOME=/app/state' \
-		'USER=cryptopred' \
-		'LOGNAME=cryptopred' \
-		'XDG_CACHE_HOME=/app/state/.cache' \
-		'TORCH_HOME=/app/state/.cache/torch' \
-		'TORCHINDUCTOR_CACHE_DIR=/app/state/.cache/torchinductor' \
-		'TRITON_CACHE_DIR=/app/state/.cache/triton' \
-		'TORCHDYNAMO_DISABLE=1' \
-		'' \
-		'HOST=0.0.0.0' \
-		'PORT=8080' \
-		'HOST_PORT=$(LIVE_HOST_PORT)' \
-		'HOST_UID=$(HOST_UID)' \
-		'HOST_GID=$(HOST_GID)' \
-		> live_sim/.env
-	@$(PYTHON) src/save_live_env_snapshot.py \
-		--source-env live_sim/.env \
-		--active-env $(LIVE_ENV_ACTIVE) \
-		--model-env $(LIVE_MODEL_ENV) \
-		--snapshot-root $(LIVE_ENV_SNAPSHOT_ROOT) \
-		--model-type $(LIVE_MODEL_TYPE) \
-		--data-source $(DATA_SOURCE) \
-		--symbol $(SYMBOL) \
-		--interval $(INTERVAL) \
-		--sim-report $(LIVE_SIM_REPORT) \
-		$(addprefix --env-file ,$(ENV_FILES)) \
-		--param ASSET_ENV="$(ASSET_ENV)" \
-		--param TRAINER_ENV="$(TRAINER_ENV)" \
-		--param SYMBOL="$(SYMBOL)" \
-		--param DATA_SOURCE="$(DATA_SOURCE)" \
-		--param INTERVAL="$(INTERVAL)" \
-		--param START="$(START)" \
-		--param END="$(END)" \
-		--param SPLIT="$(SPLIT)" \
-		--param EDGE="$(EDGE)" \
-		--param FEE="$(FEE)" \
-		--param THRESHOLD="$(THRESHOLD)" \
-		--param EXIT_THRESHOLD="$(EXIT_THRESHOLD)" \
-		--param MAX_HOLD_BARS="$(MAX_HOLD_BARS)" \
-		--param STOP_LOSS="$(STOP_LOSS)" \
-		--param TAKE_PROFIT="$(TAKE_PROFIT)" \
-		--param LIVE_MODEL_TYPE="$(LIVE_MODEL_TYPE)" \
-		--param LIVE_MODEL_SOURCE="$(LIVE_MODEL_SOURCE)" \
-		--param LIVE_RETRAIN_FREQUENCY="$(LIVE_RETRAIN_FREQUENCY)" \
-		--param LIVE_RETRAIN_TRAIN_START="$(LIVE_RETRAIN_TRAIN_START)" \
-		--param LIVE_RETRAIN_TRAIN_END="$(LIVE_RETRAIN_TRAIN_END)" \
-		--param LIVE_RETRAIN_LOOKBACK_DAYS="$(LIVE_RETRAIN_LOOKBACK_DAYS)" \
-		--param LIVE_TRAIN_MODEL_TYPE="$(LIVE_TRAIN_MODEL_TYPE)" \
-		--param LIVE_TRAIN_BACKEND="$(LIVE_TRAIN_BACKEND)" \
-		--param LIVE_TRAIN_DEVICE="$(LIVE_TRAIN_DEVICE)" \
-		--param LIVE_TRAIN_LOOKBACK="$(LIVE_TRAIN_LOOKBACK)" \
-		--param LIVE_TRAIN_SEQUENCE_FEATURE_SET="$(LIVE_TRAIN_SEQUENCE_FEATURE_SET)" \
-		--param LIVE_TRAIN_EDGE="$(LIVE_TRAIN_EDGE)" \
-		--param LIVE_TRAIN_USE_FULL_WINDOW="$(LIVE_TRAIN_USE_FULL_WINDOW)" \
-		--param LIVE_STARTING_CASH="$(LIVE_STARTING_CASH)" \
-		--param LIVE_MIN_INVEST="$(LIVE_MIN_INVEST)" \
-		--param LIVE_MAX_INVEST="$(LIVE_MAX_INVEST)" \
-		--param LIVE_CONFIDENCE_MULTIPLIER="$(LIVE_CONFIDENCE_MULTIPLIER)" \
-		--param LIVE_SLIPPAGE="$(LIVE_SLIPPAGE)" \
-		--param LIVE_CATCHUP_ENABLED="$(LIVE_CATCHUP_ENABLED)" \
-		--param LIVE_CATCHUP_SPREAD_PCT="$(LIVE_CATCHUP_SPREAD_PCT)" \
-		--param LIVE_CATCHUP_MAX_BARS="$(LIVE_CATCHUP_MAX_BARS)" \
-		--param LIVE_CATCHUP_RETRY_SECONDS="$(LIVE_CATCHUP_RETRY_SECONDS)" \
-		--param EXECUTION_MODE="$(EXECUTION_MODE)" \
-		--param REAL_TRADING_ENABLED="$(REAL_TRADING_ENABLED)" \
-		--param REAL_MAX_TOTAL_USD="$(REAL_MAX_TOTAL_USD)" \
-		--param REAL_MAX_ORDER_USD="$(REAL_MAX_ORDER_USD)" \
-		--param REAL_PORTFOLIO_MODE="$(REAL_PORTFOLIO_MODE)" \
-		--param REAL_CASH_ASSET="$(REAL_CASH_ASSET)" \
-		--param REAL_BASE_ASSET="$(REAL_BASE_ASSET)" \
-		--param COINBASE_PRODUCT_ID="$(COINBASE_PRODUCT_ID)" \
-		--param NN_MODEL_TYPE="$(NN_MODEL_TYPE)" \
-		--param NN_BACKEND="$(NN_BACKEND)" \
-		--param NN_DEVICE="$(NN_DEVICE)" \
-		--param NN_LOOKBACK="$(NN_LOOKBACK)" \
-		--param NN_SEQUENCE_FEATURE_SET="$(NN_SEQUENCE_FEATURE_SET)" \
-		--param NN_CNN_FILTERS="$(NN_CNN_FILTERS)" \
-		--param NN_CNN_KERNEL_SIZES="$(NN_CNN_KERNEL_SIZES)" \
-		--param NN_LSTM_HIDDEN_SIZE="$(NN_LSTM_HIDDEN_SIZE)" \
-		--param NN_LSTM_LAYERS="$(NN_LSTM_LAYERS)" \
-		--param NN_LSTM_DROPOUT="$(NN_LSTM_DROPOUT)" \
-		--param NN_GRU_HIDDEN_SIZE="$(NN_GRU_HIDDEN_SIZE)" \
-		--param NN_GRU_LAYERS="$(NN_GRU_LAYERS)" \
-		--param NN_GRU_DROPOUT="$(NN_GRU_DROPOUT)" \
-		--param NN_TRANSFORMER_D_MODEL="$(NN_TRANSFORMER_D_MODEL)" \
-		--param NN_TRANSFORMER_HEADS="$(NN_TRANSFORMER_HEADS)" \
-		--param NN_TRANSFORMER_LAYERS="$(NN_TRANSFORMER_LAYERS)" \
-		--param NN_TRANSFORMER_FF_DIM="$(NN_TRANSFORMER_FF_DIM)" \
-		--param NN_TRANSFORMER_DROPOUT="$(NN_TRANSFORMER_DROPOUT)" \
-		--param NN_HIDDEN_LAYERS="$(NN_HIDDEN_LAYERS)" \
-		--param NN_LR="$(NN_LR)" \
-		--param NN_EPOCHS="$(NN_EPOCHS)" \
-		--param NN_BATCH_SIZE="$(NN_BATCH_SIZE)" \
-		--param NN_L2="$(NN_L2)" \
-		--param NN_CLASS_WEIGHT_MODE="$(NN_CLASS_WEIGHT_MODE)" \
-		--param NN_SEED="$(NN_SEED)" \
-		--param NN_SIM_REPORT="$(NN_SIM_REPORT)"
-	@echo "Synced live_sim from main config:"
-	@echo "  model:    requested $(LIVE_MODEL_SOURCE); active copy live_sim/state/model.npz"
-	@echo "  env:      $(LIVE_MODEL_ENV) -> $(LIVE_ENV_ACTIVE) -> live_sim/.env"
-	@echo "  snapshot: $(LIVE_ENV_SNAPSHOT_ROOT)"
-	@echo "  symbol:   $(SYMBOL)"
-	@echo "  interval: $(INTERVAL)"
-	@echo "  catch-up: enabled=$(LIVE_CATCHUP_ENABLED), historical spread=$(LIVE_CATCHUP_SPREAD_PCT), max bars=$(LIVE_CATCHUP_MAX_BARS) (0=unlimited)"
-	@echo "  real:     execution=$(EXECUTION_MODE), enabled=$(REAL_TRADING_ENABLED), mode=$(REAL_PORTFOLIO_MODE), product=$(COINBASE_PRODUCT_ID), cash=$(REAL_CASH_ASSET), base=$(REAL_BASE_ASSET)"
-	@echo "  retrain:  every $(LIVE_RETRAIN_FREQUENCY), window $(LIVE_RETRAIN_TRAIN_START) to $(LIVE_RETRAIN_TRAIN_END) as rolling duration"
-	@echo "  train:    $(LIVE_TRAIN_MODEL_TYPE), backend=$(LIVE_TRAIN_BACKEND), device=$(LIVE_TRAIN_DEVICE), lookback=$(LIVE_TRAIN_LOOKBACK), feature_set=$(LIVE_TRAIN_SEQUENCE_FEATURE_SET), filters=$(NN_CNN_FILTERS), gru_hidden=$(NN_GRU_HIDDEN_SIZE), lstm_hidden=$(NN_LSTM_HIDDEN_SIZE), transformer=$(NN_TRANSFORMER_D_MODEL)x$(NN_TRANSFORMER_LAYERS)/h$(NN_TRANSFORMER_HEADS), hidden=$(NN_HIDDEN_LAYERS)"
+	@scripts/live_sync.sh
 
 live-setup:
 	$(MAKE) -C live_sim setup
